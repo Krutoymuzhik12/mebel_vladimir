@@ -1,0 +1,17 @@
+data/
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.db
+*.log
+.pytest_cache/
+.mypy_cache/
+*.part
+# qdrant индекс локальный — не в git (фото каталога наоборот кладём)
+data/qdrant_local/
+# исходный excel можно держать локально (тяжёлый/временный)
+data/catalog_source.xlsx
+data/catalog_inspect.json
+data/logs/

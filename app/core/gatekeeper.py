@@ -1,0 +1,97 @@
+"""Кто ведёт чат: только новые диалоги.
+
+Статусы (своя БД):
+    new      — клиент написал первым, бот ведёт
+    existing — чат уже был до бота / при старте → молчим навсегда
+    manual   — менеджер забрал (#стоп или ответ руками) → молчим до #старт
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Literal
+
+from app.db.database import Database
+
+logger = logging.getLogger(__name__)
+
+ChatStatus = Literal["new", "existing", "manual"]
+
+BOT_OWNED = "new"
+NOT_OURS = "existing"
+MANUAL = "manual"
+
+STOP_CMD = "#стоп"
+START_CMD = "#старт"
+
+
+class Gatekeeper:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def status(self, chat_id: str) -> ChatStatus | None:
+        row = self.db.get_chat(chat_id)
+        return row["status"] if row else None  # type: ignore[return-value]
+
+    def bot_may_reply(self, chat_id: str) -> bool:
+        return self.status(chat_id) == BOT_OWNED
+
+    def mark_existing(self, chat_id: str, reason: str = "baseline") -> None:
+        self.db.upsert_chat(chat_id, status=NOT_OURS)
+        logger.info("chat=%s → existing (%s)", chat_id, reason)
+
+    def claim_new(self, chat_id: str) -> None:
+        self.db.upsert_chat(chat_id, status=BOT_OWNED)
+        logger.info("chat=%s → new (first contact)", chat_id)
+
+    def classify_first_seen(
+        self, chat_id: str, *, had_prior_human_outgoing: bool
+    ) -> ChatStatus:
+        current = self.status(chat_id)
+        if current:
+            return current
+        status: ChatStatus = NOT_OURS if had_prior_human_outgoing else BOT_OWNED
+        self.db.upsert_chat(chat_id, status=status)
+        logger.info(
+            "chat=%s first seen → %s (prior_outgoing=%s)",
+            chat_id,
+            status,
+            had_prior_human_outgoing,
+        )
+        return status
+
+    def on_staff_message(self, chat_id: str, text: str) -> ChatStatus | None:
+        """Сообщение менеджера: #стоп / #старт / ручной ответ."""
+        normalized = (text or "").strip().lower()
+        current = self.status(chat_id)
+
+        if normalized == STOP_CMD:
+            if current == NOT_OURS:
+                return current
+            self.db.upsert_chat(chat_id, status=MANUAL)
+            logger.info("chat=%s → manual (#стоп)", chat_id)
+            return MANUAL
+
+        if normalized == START_CMD:
+            # existing навсегда молчит — #старт только из manual
+            if current == NOT_OURS:
+                logger.info("chat=%s #старт ignored (existing forever)", chat_id)
+                return NOT_OURS
+            if current != MANUAL and current is not None:
+                logger.info("chat=%s #старт ignored (status=%s)", chat_id, current)
+                return current
+            self.db.upsert_chat(chat_id, status=BOT_OWNED)
+            logger.info("chat=%s → new (#старт)", chat_id)
+            return BOT_OWNED
+
+        if current == BOT_OWNED:
+            self.db.upsert_chat(chat_id, status=MANUAL)
+            logger.info("chat=%s → manual (staff replied)", chat_id)
+            return MANUAL
+        return current
+
+    def baseline_many(self, chat_ids: list[str]) -> int:
+        for cid in chat_ids:
+            if self.status(cid) is None:
+                self.mark_existing(cid, reason="startup baseline")
+        return len(chat_ids)
