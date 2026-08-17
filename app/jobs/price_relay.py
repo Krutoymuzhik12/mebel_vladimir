@@ -48,13 +48,13 @@ class PriceRelay:
             return existing["request_id"]
 
         request_id = uuid.uuid4().hex[:12]
-        ok = await self.max_notifier.price_request(
+        mid = await self.max_notifier.price_request(
             chat_id=chat_id,
             summary=summary,
             ask=ask,
             request_id=request_id,
         )
-        if not ok:
+        if not mid:
             logger.warning("price MAX notify failed chat=%s — pending not opened", chat_id)
             return None
 
@@ -64,6 +64,8 @@ class PriceRelay:
             summary=summary,
             ask=ask,
         )
+        # mid карточки: по нему поймём, на какую заявку владелец ответил реплаем
+        self.db.set_price_max_message(request_id, mid)
         return request_id
 
     async def on_owner_max_message(self, text: str, *, request_id: str | None = None) -> bool:

@@ -39,6 +39,8 @@ _MIGRATIONS = (
     ("chats", "facts", "TEXT"),
     ("chats", "last_intent", "TEXT"),
     ("price_requests", "reminder_sent_at", "TEXT"),
+    # mid карточки в MAX — по нему ловим ответ владельца реплаем
+    ("price_requests", "max_message_id", "TEXT"),
 )
 
 
@@ -117,6 +119,17 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'pending',
                     created_at TEXT NOT NULL,
                     closed_at TEXT
+                );
+
+                -- Кто из сотрудников MAX сейчас пишет ответ и на какую заявку.
+                -- Ключ — сотрудник, а не заявка: пока он печатает, новые
+                -- заявки могут приходить сколько угодно и его не сбивают.
+                CREATE TABLE IF NOT EXISTS max_awaiting (
+                    max_chat_id TEXT NOT NULL,
+                    max_user_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (max_chat_id, max_user_id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_chats_status ON chats(status);
@@ -448,6 +461,91 @@ class Database:
                 VALUES (?, ?, ?, ?, 'pending', ?)
                 """,
                 (request_id, chat_id, summary, ask, now),
+            )
+
+    def set_price_max_message(self, request_id: str, mid: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE price_requests SET max_message_id=? WHERE request_id=?",
+                (mid, request_id),
+            )
+
+    def get_price_by_max_message(self, mid: str) -> dict[str, Any] | None:
+        """Заявка по карточке в MAX — владелец ответил на неё реплаем."""
+        if not mid:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM price_requests WHERE max_message_id=?",
+                (mid,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def skip_price_request(self, request_id: str) -> None:
+        """Владелец нажал «Пропустить»: клиент возвращается в обычные дожимы."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE price_requests
+                SET status='skipped', closed_at=?
+                WHERE request_id=? AND status='pending'
+                """,
+                (_utc_now(), request_id),
+            )
+
+    # ---------- ожидание ответа сотрудника в MAX ----------
+
+    def set_awaiting(self, max_chat_id: str, max_user_id: str, request_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO max_awaiting (max_chat_id, max_user_id, request_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(max_chat_id, max_user_id) DO UPDATE SET
+                    request_id=excluded.request_id,
+                    created_at=excluded.created_at
+                """,
+                (str(max_chat_id), str(max_user_id), request_id, _utc_now()),
+            )
+
+    def get_awaiting(
+        self, max_chat_id: str, max_user_id: str, *, ttl_minutes: float = 60.0
+    ) -> str | None:
+        """Заявка, ответ на которую сотрудник сейчас печатает.
+
+        Протухшее ожидание не отдаём: иначе забытое нажатие «Ответить» через
+        сутки перехватит постороннюю реплику в чате и отправит её клиенту.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT request_id, created_at FROM max_awaiting
+                WHERE max_chat_id=? AND max_user_id=?
+                """,
+                (str(max_chat_id), str(max_user_id)),
+            ).fetchone()
+        if not row:
+            return None
+        created = _parse_iso(row["created_at"])
+        if created is None:
+            return None
+        age_min = (datetime.now(timezone.utc) - created).total_seconds() / 60.0
+        if age_min > ttl_minutes:
+            self.clear_awaiting(max_chat_id, max_user_id)
+            return None
+        return str(row["request_id"])
+
+    def clear_awaiting(self, max_chat_id: str, max_user_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM max_awaiting WHERE max_chat_id=? AND max_user_id=?",
+                (str(max_chat_id), str(max_user_id)),
+            )
+
+    def clear_awaiting_for_request(self, request_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM max_awaiting WHERE request_id=?", (request_id,)
             )
 
     def close_price_request(self, request_id: str, *, delivered: bool) -> None:

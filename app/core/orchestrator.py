@@ -19,6 +19,7 @@ from app.core.quiet_hours import QuietHours
 from app.db.database import Database
 from app.jobs.avito_show_phone import AvitoShowPhoneJob
 from app.jobs.followups import FollowUpJob
+from app.jobs.max_inbox import MaxInbox
 from app.jobs.price_relay import PriceRelay
 from app.notify.max import MaxNotifier
 from app.transports.base import IncomingMessage
@@ -41,6 +42,7 @@ class Orchestrator:
         self.followup_job = FollowUpJob(
             settings, db, wazzup, self.quiet, self.max_notifier
         )
+        self.max_inbox = MaxInbox(settings, db, self.max_notifier, self.price_relay)
         self.batcher = MessageBatcher(settings, self._on_batch)
         self._bg_tasks: list[asyncio.Task] = []
 
@@ -51,11 +53,13 @@ class Orchestrator:
             logger.info("baseline existing chats: %s", n)
         self._bg_tasks.append(asyncio.create_task(self._followup_loop()))
         self._bg_tasks.append(asyncio.create_task(self._avito_retry_loop()))
+        self._bg_tasks.append(asyncio.create_task(self.max_inbox.run_forever()))
 
     async def shutdown(self) -> None:
         for t in self._bg_tasks:
             t.cancel()
         await self.wazzup.aclose()
+        await self.max_notifier.aclose()
 
     def verify_webhook(
         self,

@@ -418,6 +418,146 @@ async def main(argv: list[str]) -> int:
     media_mod.download, tr_mod.transcribe_bytes = orig_download, orig_transcribe
     settings.vision_enabled = False
 
+    print("\n=== 12. MAX: кнопки, ожидание ответа, параллельные заявки ===")
+    from app.jobs.max_inbox import MaxInbox
+    from app.jobs.price_relay import PriceRelay
+    from app.notify.max import ANSWER_PREFIX, SKIP_PREFIX, MaxNotifier
+
+    MAX_CHAT = "12345"
+    settings.max_enabled = True
+    settings.max_bot_token = "test-token"
+    settings.max_group_id = MAX_CHAT
+
+    class FakeMax(MaxNotifier):
+        """Тот же класс, но без сети: карточки и ответы копятся в списках."""
+
+        def __init__(self, settings_obj):
+            super().__init__(settings_obj)
+            self.cards: list[str] = []
+            self.notes: list[str] = []
+            self._n = 0
+
+        async def send(self, text, *, buttons=None):
+            self._n += 1
+            mid = f"max-mid-{self._n}"
+            self.cards.append(text)
+            return mid
+
+        async def answer_callback(self, callback_id, notification=""):
+            self.notes.append(notification)
+            return True
+
+    fake_max = FakeMax(settings)
+    relay = PriceRelay(db, wazzup, fake_max)
+    inbox = MaxInbox(settings, db, fake_max, relay)
+
+    def cb(payload: str, *, user: str = "7001", cid: str = "cb-1") -> dict:
+        return {
+            "update_type": "message_callback",
+            "callback": {
+                "callback_id": cid,
+                "payload": payload,
+                "user": {"user_id": int(user)},
+            },
+            "message": {"recipient": {"chat_id": int(MAX_CHAT)}},
+        }
+
+    def owner_msg(text: str, *, user: str = "7001", reply_mid: str = "") -> dict:
+        msg = {
+            "sender": {"user_id": int(user), "is_bot": False},
+            "recipient": {"chat_id": int(MAX_CHAT)},
+            "body": {"mid": "in-1", "text": text},
+        }
+        if reply_mid:
+            msg["link"] = {"type": "reply", "message": {"mid": reply_mid}}
+        return {"update_type": "message_created", "message": msg}
+
+    rid_a = await relay.on_client_wants_price(
+        chat_id="555000111", summary="кухня 3 метра", ask="посчитать кухню"
+    )
+    failures += not check("заявка А заведена", bool(rid_a), str(rid_a))
+    failures += not check("карточка ушла в MAX", len(fake_max.cards) == 1)
+
+    await inbox.handle_update(cb(f"{ANSWER_PREFIX}{rid_a}"))
+    failures += not check(
+        "после «Ответить» ждём текст",
+        db.get_awaiting(MAX_CHAT, "7001") == rid_a,
+    )
+
+    # Пока сотрудник печатает ответ по А, второй клиент тоже просит расчёт.
+    # Заявка Б не должна сбить режим ожидания, открытый на А.
+    db.remember_route("555000222", channel_id=CHANNEL_ID, chat_type="telegram")
+    rid_b = await relay.on_client_wants_price(
+        chat_id="555000222", summary="шкаф купе", ask="посчитать шкаф"
+    )
+    failures += not check("заявка Б заведена", bool(rid_b) and rid_b != rid_a)
+    failures += not check(
+        "новая заявка не сбила ожидание",
+        db.get_awaiting(MAX_CHAT, "7001") == rid_a,
+        f"ожидание на {db.get_awaiting(MAX_CHAT, '7001')}, а было {rid_a}",
+    )
+
+    before = len(wazzup.sent)
+    await inbox.handle_update(owner_msg("Кухня 3 метра — 145 000 рублей"))
+    sent_now = wazzup.sent[before:]
+    failures += not check("ответ ушёл клиенту", len(sent_now) == 1)
+    if sent_now:
+        failures += not check(
+            "текст владельца передан как есть",
+            "145 000" in sent_now[0][1],
+            sent_now[0][1][:60],
+        )
+    row_a = db.get_price_by_request_id(rid_a)
+    failures += not check(
+        "заявка А закрыта", row_a and row_a["status"] == "delivered",
+        str(row_a.get("status") if row_a else "нет"),
+    )
+    failures += not check(
+        "ожидание снято", db.get_awaiting(MAX_CHAT, "7001") is None
+    )
+
+    # Второй сотрудник отвечает реплаем на карточку — без всякой кнопки
+    row_b = db.get_price_by_request_id(rid_b)
+    before = len(wazzup.sent)
+    await inbox.handle_update(
+        owner_msg("Шкаф — 92 000", user="7002", reply_mid=row_b["max_message_id"])
+    )
+    failures += not check("реплай на карточку сработал", len(wazzup.sent) == before + 1)
+
+    # Посторонняя болтовня в чате клиенту не уходит
+    before = len(wazzup.sent)
+    await inbox.handle_update(owner_msg("обед в 14:00", user="7003"))
+    failures += not check("посторонняя реплика не ушла", len(wazzup.sent) == before)
+
+    # «Пропустить» закрывает заявку и возвращает чат в обычные дожимы
+    rid_c = await relay.on_client_wants_price(
+        chat_id="555000111", summary="прихожая", ask="посчитать прихожую"
+    )
+    await inbox.handle_update(cb(f"{SKIP_PREFIX}{rid_c}", cid="cb-2"))
+    row_c = db.get_price_by_request_id(rid_c)
+    failures += not check(
+        "«Пропустить» закрыло заявку",
+        row_c and row_c["status"] == "skipped",
+        str(row_c.get("status") if row_c else "нет"),
+    )
+    failures += not check(
+        "после пропуска чат снова дожимается",
+        db.get_pending_price("555000111") is None,
+    )
+
+    # Протухшее ожидание не перехватывает чужие сообщения
+    rid_d = await relay.on_client_wants_price(
+        chat_id="555000111", summary="кровать", ask="посчитать кровать"
+    )
+    await inbox.handle_update(cb(f"{ANSWER_PREFIX}{rid_d}", cid="cb-3"))
+    failures += not check(
+        "протухшее ожидание не отдаётся",
+        db.get_awaiting(MAX_CHAT, "7001", ttl_minutes=-1) is None,
+    )
+
+    settings.max_enabled = False
+    settings.max_bot_token = ""
+
     await orch.shutdown()
     print("\n" + "=" * 52)
     if failures:

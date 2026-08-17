@@ -54,8 +54,12 @@ class Settings(BaseSettings):
     history_limit: int = 40
     confidence_threshold: float = 0.6
 
+    # MAX Bot API: токен бота и id рабочего чата, куда падают заявки
+    max_bot_token: str = ""
     max_group_id: str = ""
     max_enabled: bool = False
+    # Сколько минут держим режим «сотрудник печатает ответ» после нажатия кнопки
+    max_awaiting_ttl_min: float = 60.0
 
     company_name: str = ""
     manager_name: str = "Владимир"
