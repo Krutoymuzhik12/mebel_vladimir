@@ -241,6 +241,21 @@ class WazzupTransport:
             # external_id пустой: не засоряем seen_messages выдуманным id
             return SendResult(ok=True)
 
+        # Предохранитель на отправку. Фильтр на приёме отсекает чужие каналы,
+        # но дожимы и релей цены отправляют по сохранённому в БД роутингу, а не
+        # в ответ на входящее. Пока идёт тест, наружу не должно уйти ничего,
+        # кроме разрешённого канала — даже из старых чатов в базе.
+        if self.settings.test_mode and not self.channel_allowed(channel_id, chat_type):
+            logger.warning(
+                "ТЕСТ: отправка заблокирована — канал %s (%s) не в списке "
+                "разрешённых. chat=%s | текст: %s",
+                channel_id,
+                chat_type,
+                chat_id,
+                (text or "")[:200],
+            )
+            return SendResult(ok=False, error="channel not allowed in test mode")
+
         body: dict[str, Any] = {
             "channelId": channel_id,
             "chatId": chat_id,

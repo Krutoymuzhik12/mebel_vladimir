@@ -213,6 +213,16 @@ async def main(argv: list[str]) -> int:
                           "перехвачен" if calls else "запроса не было")
     failures += not check("и он падает на перехватчике", not res2.ok)
 
+    # Предохранитель: даже с включённой отправкой наружу уходит только
+    # разрешённый канал. Дожимы и релей цены шлют по роутингу из БД, а не в
+    # ответ на входящее, поэтому фильтра на приёме здесь недостаточно.
+    db.remember_route("555000999", channel_id=FOREIGN_CHANNEL_ID, chat_type="whatsapp")
+    before_calls = len(calls)
+    res3 = await real.send_text("555000999", "В чужой канал уйти не должно")
+    failures += not check("чужой канал заблокирован на отправке", not res3.ok, res3.error)
+    failures += not check("наружу запроса не было", len(calls) == before_calls)
+    settings.wazzup_send_enabled = False
+
     print("\n=== 10. Дожимы: причина срыва решает текст ===")
     from datetime import datetime, timedelta, timezone
 
