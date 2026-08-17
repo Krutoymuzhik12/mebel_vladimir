@@ -42,6 +42,11 @@ async def lifespan(app: FastAPI):
         "on" if settings.max_enabled else "off",
         settings.history_limit,
     )
+    if not settings.wazzup_send_enabled:
+        logger.warning(
+            "ОТПРАВКА ВЫКЛЮЧЕНА (WAZZUP_SEND_ENABLED=0): ответы только в лог, "
+            "клиентам ничего не уходит"
+        )
     if settings.test_mode:
         logger.warning(
             "ТЕСТОВЫЙ РЕЖИМ: слушаю только channel_ids=%s chat_types=%s | отправка=%s",
@@ -140,7 +145,9 @@ async def wazzup_webhook_probe(secret: str = ""):
 def main() -> None:
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8080, reload=False)
+    uvicorn.run(
+        "app.main:app", host=settings.app_host, port=settings.app_port, reload=False
+    )
 
 
 if __name__ == "__main__":

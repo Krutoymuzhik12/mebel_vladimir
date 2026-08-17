@@ -6,10 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/vladimir_mebel
+WorkingDirectory=/var/opt/vladimir_mebel
 Environment=PYTHONUNBUFFERED=1
-# Наружу не слушаем: снаружи только nginx с https
-ExecStart=/opt/vladimir_mebel/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8080
+# Наружу не слушаем: снаружи только nginx с https.
+# Порт 8095 — 8080 занят java, 8000 другим проектом.
+ExecStart=/var/opt/vladimir_mebel/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8095
 Restart=always
 RestartSec=5
 StandardOutput=journal

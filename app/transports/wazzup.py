@@ -231,14 +231,15 @@ class WazzupTransport:
             return SendResult(ok=False, error="no channel route for chat")
 
         if not self.settings.wazzup_send_enabled:
-            logger.info(
-                "DRY-RUN: не отправляю chat=%s type=%s len=%s | %s",
+            logger.warning(
+                "DRY-RUN (WAZZUP_SEND_ENABLED=0): наружу НЕ отправлено "
+                "chat=%s type=%s | текст: %s",
                 chat_id,
                 chat_type,
-                len(text or ""),
-                (text or "")[:200],
+                (text or "")[:500],
             )
-            return SendResult(ok=True, external_id="dry-run")
+            # external_id пустой: не засоряем seen_messages выдуманным id
+            return SendResult(ok=True)
 
         body: dict[str, Any] = {
             "channelId": channel_id,

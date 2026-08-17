@@ -14,6 +14,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import httpx
+
 from app.config import settings
 from app.core.orchestrator import Orchestrator
 from app.db.database import Database
@@ -182,6 +184,34 @@ async def main(argv: list[str]) -> int:
     chat = db.get_chat("555000111")
     failures += not check("статус new", chat and chat["status"] == "new",
                           str(chat["status"]) if chat else "нет чата")
+
+    print("\n=== 9. Режим тишины (WAZZUP_SEND_ENABLED=0) ===")
+    # Настоящий транспорт, не подменённый: проверяем, что наружу нет запроса
+    real = WazzupTransport(settings, db)
+    calls: list[str] = []
+
+    class _Tripwire:
+        is_closed = False
+
+        async def post(self, url, **kw):
+            calls.append(url)
+            # сетевая ошибка: транспорт ловит её штатно, тест не падает
+            raise httpx.ConnectError("tripwire: запрос наружу перехвачен")
+
+    real._client = _Tripwire()  # type: ignore[assignment]
+    settings.wazzup_api_key = settings.wazzup_api_key or "test-key"
+    settings.wazzup_send_enabled = False
+
+    res = await real.send_text("555000111", "Этот текст не должен уйти")
+    failures += not check("send_text вернул ok", res.ok)
+    failures += not check("наружу ни одного запроса", not calls)
+    failures += not check("нет фиктивного external_id", res.external_id == "")
+
+    settings.wazzup_send_enabled = True
+    res2 = await real.send_text("555000111", "А это уже пошло бы")
+    failures += not check("с включённой отправкой запрос идёт", bool(calls),
+                          "перехвачен" if calls else "запроса не было")
+    failures += not check("и он падает на перехватчике", not res2.ok)
 
     await orch.shutdown()
     print("\n" + "=" * 52)

@@ -18,6 +18,9 @@ class Settings(BaseSettings):
 
     fast_mode: bool = False
     timezone: str = "Europe/Moscow"
+    # 8080 на сервере занят — порт вынесен в .env
+    app_host: str = "127.0.0.1"
+    app_port: int = 8095
     push_hour_start: int = 9
     push_hour_end: int = 18
     followup_silence_hours: float = 4.0
@@ -37,8 +40,9 @@ class Settings(BaseSettings):
     test_chat_types: str = ""
     # Логировать сырой payload вебхука целиком (для разбора форматов)
     log_raw_webhook: bool = False
-    # 0 — «сухой» прогон: считаем ответ, но не отправляем клиенту
-    wazzup_send_enabled: bool = True
+    # 0 — «сухой» прогон: считаем ответ, но не отправляем клиенту.
+    # Дефолт False: забытая переменная в .env не должна приводить к письмам клиентам.
+    wazzup_send_enabled: bool = False
     # Менеджер ответил руками (isEcho) → чат уходит в manual
     staff_takeover_on_echo: bool = True
 
