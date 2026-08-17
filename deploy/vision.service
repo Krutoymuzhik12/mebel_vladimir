@@ -1,0 +1,22 @@
+[Unit]
+Description=Vladimir mebel vision (подбор по фото, DINOv2 + Qdrant)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/opt/vladimir_mebel
+Environment=PYTHONUNBUFFERED=1
+# Отдельное окружение: torch тяжёлый, в основной venv ему делать нечего.
+# Наружу не слушаем — ходит только основной сервис с этой же машины.
+ExecStart=/var/opt/vladimir_mebel/.venv-vision/bin/python -m uvicorn app.vision.api:app --host 127.0.0.1 --port 8090
+# Модель грузится в память при первом запросе, старт не мгновенный
+TimeoutStartSec=300
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

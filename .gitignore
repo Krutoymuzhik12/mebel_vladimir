@@ -3,6 +3,8 @@ data/
 __pycache__/
 *.pyc
 .venv/
+# отдельное окружение vision: torch со всеми потрохами
+.venv-vision/
 venv/
 *.db
 *.log
