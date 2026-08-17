@@ -182,6 +182,23 @@ class Orchestrator:
 
         normalized = text.lower()
         is_command = normalized in {STOP_CMD, START_CMD}
+
+        # Автоответ Wazzup («Спасибо, что написали, мы скоро ответим») приходит
+        # тем же эхом, что и ручная реплика менеджера, но без автора. У живого
+        # сотрудника authorName заполнен всегда. Без этой проверки первое же
+        # приветствие площадки уводило чат в manual, и бот замолкал навсегда.
+        if (
+            not is_command
+            and self.settings.staff_takeover_requires_author
+            and not (msg.author_name or "").strip()
+        ):
+            logger.info(
+                "эхо без автора chat=%s — автоответ площадки, не перехват | %s",
+                msg.chat_id,
+                text[:120],
+            )
+            return
+
         if not is_command and not self.settings.staff_takeover_on_echo:
             logger.info(
                 "staff echo chat=%s — перехват выключен (STAFF_TAKEOVER_ON_ECHO=0)",

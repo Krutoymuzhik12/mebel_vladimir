@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     wazzup_send_enabled: bool = False
     # Менеджер ответил руками (isEcho) → чат уходит в manual
     staff_takeover_on_echo: bool = True
+    # Перехватывать чат только если у эха есть автор. Пустой автор — это
+    # автоответ площадки или другая интеграция, а не живой менеджер.
+    staff_takeover_requires_author: bool = True
 
     poe_api_key: str = ""
     poe_base_url: str = "https://api.poe.com/v1"

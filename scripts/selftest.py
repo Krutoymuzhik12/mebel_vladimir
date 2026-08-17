@@ -33,7 +33,15 @@ CHANNEL_ID = "11111111-2222-3333-4444-555555555555"
 FOREIGN_CHANNEL_ID = "99999999-9999-9999-9999-999999999999"
 
 
-def payload(text: str, *, channel_id: str, chat_type: str, mid: str, echo: bool = False):
+def payload(
+    text: str,
+    *,
+    channel_id: str,
+    chat_type: str,
+    mid: str,
+    echo: bool = False,
+    author: str = "",
+):
     return {
         "messages": [
             {
@@ -46,6 +54,7 @@ def payload(text: str, *, channel_id: str, chat_type: str, mid: str, echo: bool 
                 "isEcho": echo,
                 "contact": {"name": "Тест Клиент"},
                 "text": text,
+                "authorName": author,
                 "status": "inbound" if not echo else "sent",
             }
         ]
@@ -160,9 +169,22 @@ async def main(argv: list[str]) -> int:
     failures += not check("дубль не обработан", len(wazzup.sent) == before)
 
     print("\n=== 7. Менеджер ответил руками -> manual ===")
+    # Автоответ площадки приходит тем же эхом, но без автора — он не должен
+    # уводить чат в manual, иначе бот замолкает после первого же приветствия
+    await orch.handle_webhook_payload(
+        payload("Здравствуйте! Спасибо, что написали. Мы скоро ответим.",
+                channel_id=CHANNEL_ID, chat_type="telegram", mid="m3a", echo=True)
+    )
+    chat = db.get_chat("555000111")
+    failures += not check(
+        "автоответ площадки не перехватывает чат",
+        chat and chat["status"] == "new",
+        str(chat["status"]) if chat else "нет чата",
+    )
+
     await orch.handle_webhook_payload(
         payload("Я сам отвечу этому клиенту", channel_id=CHANNEL_ID,
-                chat_type="telegram", mid="m4", echo=True)
+                chat_type="telegram", mid="m4", echo=True, author="Пётр")
     )
     chat = db.get_chat("555000111")
     failures += not check("статус manual", chat and chat["status"] == "manual",
