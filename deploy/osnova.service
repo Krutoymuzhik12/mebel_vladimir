@@ -1,0 +1,19 @@
+[Unit]
+Description=Vladimir mebel osnova (Wazzup AI manager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vladimir_mebel
+Environment=PYTHONUNBUFFERED=1
+# Наружу не слушаем: снаружи только nginx с https
+ExecStart=/opt/vladimir_mebel/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
