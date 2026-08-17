@@ -28,14 +28,26 @@ class VisionClient:
         top_k: int = 5,
         colors: str | None = None,
     ) -> dict[str, Any]:
+        return await self.search_bytes(
+            path.read_bytes(), filename=path.name, top_k=top_k, colors=colors
+        )
+
+    async def search_bytes(
+        self,
+        data: bytes,
+        *,
+        filename: str = "photo.jpg",
+        top_k: int = 5,
+        colors: str | None = None,
+    ) -> dict[str, Any]:
+        """Фото приходит из вебхука в памяти — на диск его класть незачем."""
         if not self.enabled:
             return {"found": False, "matches": [], "error": "vision disabled"}
-        data: dict[str, Any] = {"top_k": str(top_k)}
+        form: dict[str, Any] = {"top_k": str(top_k)}
         if colors:
-            data["colors"] = colors
+            form["colors"] = colors
         async with httpx.AsyncClient(timeout=60.0) as client:
-            with path.open("rb") as f:
-                files = {"file": (path.name, f, "image/jpeg")}
-                r = await client.post(f"{self.base_url}/search", data=data, files=files)
+            files = {"file": (filename, data, "image/jpeg")}
+            r = await client.post(f"{self.base_url}/search", data=form, files=files)
             r.raise_for_status()
             return r.json()

@@ -12,6 +12,7 @@ tzdata>=2024.1
 # rembg
 # MAX (позже):
 # maxapi-python / pymax
-# Голос (позже):
-# faster-whisper
-# openai
+# Голос — код готов, ставится один из провайдеров:
+#   pip install faster-whisper     (local, бесплатно, ~1 ГБ RAM на модель small)
+#   pip install openai             (OPENAI_API_KEY)
+#   pip install fastapi-poe        (poe, использует уже имеющийся POE_API_KEY)

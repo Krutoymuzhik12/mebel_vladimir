@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.core.orchestrator import Orchestrator
 from app.db.database import Database
+from app.services import transcription
 from app.transports.wazzup import WazzupTransport
 
 logging.basicConfig(
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI):
     await orch.startup()
     logger.info(
         "osnova up | push_window=%02d-%02d %s | wazzup_key=%s | poe_key=%s | "
-        "max=%s | history=%s",
+        "max=%s | history=%s | голос=%s | фото=%s",
         settings.push_hour_start,
         settings.push_hour_end,
         settings.timezone,
@@ -41,6 +42,8 @@ async def lifespan(app: FastAPI):
         "yes" if settings.poe_api_key else "НЕТ",
         "on" if settings.max_enabled else "off",
         settings.history_limit,
+        transcription.provider(),
+        "on" if settings.vision_enabled else "off",
     )
     if not settings.wazzup_send_enabled:
         logger.warning(

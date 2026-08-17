@@ -38,7 +38,9 @@ class Orchestrator:
         self.max_notifier = MaxNotifier(settings)
         self.price_relay = PriceRelay(db, wazzup, self.max_notifier)
         self.avito_job = AvitoShowPhoneJob(db, wazzup, self.max_notifier)
-        self.followup_job = FollowUpJob(settings, db, wazzup, self.quiet)
+        self.followup_job = FollowUpJob(
+            settings, db, wazzup, self.quiet, self.max_notifier
+        )
         self.batcher = MessageBatcher(settings, self._on_batch)
         self._bg_tasks: list[asyncio.Task] = []
 
@@ -197,6 +199,9 @@ class Orchestrator:
         result = await self.dialog.handle(chat_id, messages)
         if result.extracted:
             self.db.merge_facts(chat_id, result.extracted)
+        # Интент нужен и после диалога: по нему выбираем, чем дожимать (stall.py)
+        if result.intent:
+            self.db.upsert_chat(chat_id, last_intent=result.intent)
         if result.wants_price or result.markers.price_request:
             history = self.db.recent_messages(chat_id, self.settings.history_limit)
             summary = "\n".join(
@@ -231,8 +236,37 @@ class Orchestrator:
             if send.external_id:
                 self.db.mark_seen(send.external_id, chat_id)
             self.db.touch_bot_message(chat_id)
+            await self._send_catalog_photos(chat_id, result.matches)
         else:
             logger.error("reply not sent chat=%s err=%s", chat_id, send.error)
+
+    async def _send_catalog_photos(
+        self, chat_id: str, matches: list[dict[str, Any]]
+    ) -> None:
+        """Фото найденных по картинке позиций — вслед за текстом ответа."""
+        if not matches or not self.settings.send_catalog_photos:
+            return
+        for item in matches[: max(1, self.settings.catalog_photos_limit)]:
+            url = self.settings.public_media_url(str(item.get("photo_path") or ""))
+            if not url:
+                logger.info("фото каталога не отправлено: нет PUBLIC_WEBHOOK_URL")
+                return
+            caption = str(item.get("name") or item.get("article") or "").strip()
+            price = str(item.get("price") or "").strip()
+            if price:
+                caption = f"{caption} — {price}".strip(" —")
+            send = await self.wazzup.send_media(chat_id, url, caption=caption)
+            if send.ok:
+                self.db.add_message(chat_id, role="assistant", text=caption, kind="image")
+                if send.external_id:
+                    self.db.mark_seen(send.external_id, chat_id)
+            else:
+                logger.info(
+                    "фото каталога не ушло chat=%s url=%s err=%s",
+                    chat_id,
+                    url,
+                    send.error,
+                )
 
     async def _human_pause(self) -> None:
         """Пауза перед ответом — чтобы бот не отвечал мгновенно."""

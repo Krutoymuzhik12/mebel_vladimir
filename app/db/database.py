@@ -23,6 +23,8 @@ CHAT_COLUMNS = frozenset(
         "facts",
         "last_user_msg_at",
         "last_bot_msg_at",
+        # Интент последнего сообщения клиента — по нему выбираем дожим
+        "last_intent",
         "followup_stage",
         "followup_last_sent_at",
         "show_phone_at",
@@ -35,6 +37,8 @@ _MIGRATIONS = (
     ("chats", "channel_id", "TEXT"),
     ("chats", "chat_type", "TEXT"),
     ("chats", "facts", "TEXT"),
+    ("chats", "last_intent", "TEXT"),
+    ("price_requests", "reminder_sent_at", "TEXT"),
 )
 
 
@@ -281,16 +285,22 @@ class Database:
     def touch_bot_message(self, chat_id: str) -> None:
         self.upsert_chat(chat_id, last_bot_msg_at=_utc_now())
 
-    def candidates_for_followup(self, silence_hours: float) -> list[dict[str, Any]]:
-        """Клиент молчит silence_hours после последнего ответа бота."""
+    def candidates_for_followup(self, max_stage: int = 3) -> list[dict[str, Any]]:
+        """Чаты, где клиент молчит после нашего сообщения.
+
+        Насколько долго он должен молчать — здесь не решаем: задержка зависит от
+        причины срыва (см. app/core/stall.py), поэтому отдаём всех молчащих
+        вместе с посчитанным silent_hours, а отбор делает вызывающий.
+        """
         with self._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM chats
                 WHERE status='new'
-                  AND followup_stage = 0
+                  AND followup_stage < ?
                   AND last_bot_msg_at IS NOT NULL
-                """
+                """,
+                (max_stage,),
             ).fetchall()
         out: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
@@ -303,10 +313,60 @@ class Database:
             # клиент ответил после бота — не пушим
             if user_at is not None and user_at >= bot_at:
                 continue
-            age_h = (now - bot_at).total_seconds() / 3600.0
-            if age_h >= silence_hours:
+            d["silent_hours"] = (now - bot_at).total_seconds() / 3600.0
+            out.append(d)
+        return out
+
+    def stale_pending_prices(self, older_than_hours: float) -> list[dict[str, Any]]:
+        """Заявки на расчёт, которые владелец не закрыл за отведённое время.
+
+        Клиент в таких чатах ждёт нас — вместо дожима клиенту напоминаем себе.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM price_requests WHERE status='pending'"
+            ).fetchall()
+        now = datetime.now(timezone.utc)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            d = dict(row)
+            created = _parse_iso(d.get("created_at"))
+            if created is None:
+                continue
+            age_h = (now - created).total_seconds() / 3600.0
+            if age_h >= older_than_hours:
+                d["age_hours"] = age_h
                 out.append(d)
         return out
+
+    def set_message_text(self, external_id: str, text: str) -> None:
+        """Дописать текст к уже сохранённому сообщению.
+
+        Нужно для голосовых: в момент приёма текста ещё нет, он появляется
+        после расшифровки, а в историю диалога должна попасть именно речь.
+        """
+        if not external_id:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE messages SET text=? WHERE external_id=?",
+                (text, external_id),
+            )
+
+    def price_reminder_sent(self, request_id: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT reminder_sent_at FROM price_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+        return bool(row and row["reminder_sent_at"])
+
+    def mark_price_reminder_sent(self, request_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE price_requests SET reminder_sent_at=? WHERE request_id=?",
+                (_utc_now(), request_id),
+            )
 
     def record_followup_sent(self, chat_id: str, stage: int = 1) -> None:
         self.upsert_chat(

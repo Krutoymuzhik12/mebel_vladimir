@@ -213,6 +213,211 @@ async def main(argv: list[str]) -> int:
                           "перехвачен" if calls else "запроса не было")
     failures += not check("и он падает на перехватчике", not res2.ok)
 
+    print("\n=== 10. Дожимы: причина срыва решает текст ===")
+    from datetime import datetime, timedelta, timezone
+
+    from app.core import stall
+
+    failures += not check(
+        "возражение -> objection",
+        stall.reason_for("objection") == stall.OBJECTION,
+    )
+    failures += not check(
+        "готов заказать -> ready_stalled",
+        stall.reason_for("ready_to_order") == stall.READY_STALLED,
+    )
+    failures += not check(
+        "ремонт не готов -> deferred",
+        stall.reason_for("deferred_demand") == stall.DEFERRED,
+    )
+    failures += not check(
+        "неизвестный интент -> ghosted",
+        stall.reason_for(None) == stall.GHOSTED,
+    )
+    failures += not check(
+        "незакрытый расчёт перебивает интент",
+        stall.reason_for("objection", has_pending_price=True) == stall.WAITING_US,
+    )
+    failures += not check(
+        "отказавшемуся не пишем никогда",
+        stall.next_followup(stall.REFUSED, stage=0, silent_hours=1000) is None,
+    )
+    failures += not check(
+        "ждущему нас не пишем никогда",
+        stall.next_followup(stall.WAITING_US, stage=0, silent_hours=1000) is None,
+    )
+    failures += not check(
+        "рано — молчим",
+        stall.next_followup(stall.GHOSTED, stage=0, silent_hours=1, base_hours=4) is None,
+    )
+    failures += not check(
+        "ступени не бесконечны",
+        stall.next_followup(stall.GHOSTED, stage=99, silent_hours=1000) is None,
+    )
+
+    # Тихие часы иначе зарубят дожим в зависимости от времени прогона
+    settings.push_hour_start, settings.push_hour_end = 0, 24
+
+    def _silent_for(hours: float, intent: str) -> None:
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        db.upsert_chat(
+            "555000111",
+            status="new",
+            last_bot_msg_at=stamp,
+            last_user_msg_at=(
+                datetime.now(timezone.utc) - timedelta(hours=hours + 1)
+            ).isoformat(),
+            last_intent=intent,
+            followup_stage=0,
+        )
+
+    _silent_for(5, "objection")
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    sent_objection = wazzup.sent[before:]
+    failures += not check(
+        "возражение дожато", len(sent_objection) == 1, f"отправлено {len(sent_objection)}"
+    )
+    if sent_objection:
+        failures += not check(
+            "текст про цену, а не дежурный",
+            "останавливает" in sent_objection[0][1],
+            sent_objection[0][1][:60],
+        )
+    chat = db.get_chat("555000111")
+    failures += not check(
+        "ступень выросла",
+        bool(chat) and int(chat.get("followup_stage") or 0) == 1,
+        str(chat.get("followup_stage") if chat else "нет чата"),
+    )
+
+    _silent_for(5, "refusal")
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check("после отказа молчим", len(wazzup.sent) == before)
+
+    _silent_for(5, "objection")
+    db.open_price_request(
+        request_id="testreq01", chat_id="555000111", summary="тест", ask="тест"
+    )
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check(
+        "пока расчёт не отправлен — клиента не дёргаем", len(wazzup.sent) == before
+    )
+    db.close_price_request("testreq01", delivered=True)
+
+    print("\n=== 11. Голосовые и фото ===")
+    from app.services import media as media_mod
+    from app.services import transcription as tr_mod
+    from app.transports.base import IncomingMessage
+
+    failures += not check(
+        "галлюцинация Whisper отбракована",
+        tr_mod.unclear("Субтитры сделал DimaTorzok"),
+    )
+    failures += not check(
+        "подпись фонового звука отбракована", tr_mod.unclear("(СПОКОЙНАЯ МУЗЫКА)")
+    )
+    failures += not check(
+        "зацикленный шум отбракован", tr_mod.unclear("Спасибо. Спасибо. Спасибо.")
+    )
+    failures += not check(
+        "живая речь проходит",
+        not tr_mod.unclear("Здравствуйте, нужен шкаф купе в спальню два метра"),
+    )
+    failures += not check(
+        "удвоенная расшифровка схлопнута",
+        tr_mod._dedupe("нужен шкаф купе нужен шкаф купе") == "нужен шкаф купе",
+    )
+
+    voice_msg = IncomingMessage(
+        chat_id="555000111",
+        message_id="voice-1",
+        kind="voice",
+        media_url="https://example.invalid/voice.ogg",
+    )
+    orig_download, orig_transcribe = media_mod.download, tr_mod.transcribe_bytes
+
+    async def _fake_download(url, *, max_bytes=None):
+        return b"fake-audio-bytes"
+
+    async def _fake_transcribe(data, suffix=".ogg"):
+        return "Здравствуйте, нужен шкаф купе в спальню два метра"
+
+    media_mod.download = _fake_download
+    tr_mod.transcribe_bytes = _fake_transcribe
+    text, hints = await orch.dialog._read_voice([voice_msg])
+    failures += not check("голосовое расшифровано", "шкаф купе" in text, text[:50])
+    failures += not check(
+        "модели запрещено переспрашивать",
+        any("правильно ли я понял" in h for h in hints),
+    )
+
+    async def _fake_garbage(data, suffix=".ogg"):
+        return "Субтитры сделал DimaTorzok"
+
+    tr_mod.transcribe_bytes = _fake_garbage
+    text2, hints2 = await orch.dialog._read_voice([voice_msg])
+    failures += not check("мусор не попал в диалог", text2 == "", text2[:40])
+    failures += not check(
+        "вместо мусора просим повторить",
+        any("не расслышал" in h for h in hints2),
+    )
+
+    photo_msg = IncomingMessage(
+        chat_id="555000111",
+        message_id="photo-1",
+        kind="image",
+        media_url="https://example.invalid/photo.jpg",
+    )
+    settings.vision_enabled = False
+    ph_hints, ph_matches = await orch.dialog._read_photos([photo_msg])
+    failures += not check("без vision честно говорим о недоступности", bool(ph_hints))
+    failures += not check("совпадений нет", ph_matches == [])
+
+    settings.vision_enabled = True
+
+    async def _fake_search(data, *, filename="photo.jpg", top_k=5, colors=None):
+        return {
+            "found": True,
+            "matches": [
+                {
+                    "article": "AV-10004515",
+                    "name": "Обувница №2",
+                    "price": "4 950 ₽",
+                    "similarity": 0.81,
+                    "photo_path": "catalog/AV-10004515/01.jpg",
+                }
+            ],
+        }
+
+    orch.dialog.vision.search_bytes = _fake_search
+    ph_hints2, ph_matches2 = await orch.dialog._read_photos([photo_msg])
+    failures += not check(
+        "найденная модель попала в подсказку",
+        any("Обувница №2" in h for h in ph_hints2),
+    )
+    failures += not check("совпадение вернулось", len(ph_matches2) == 1)
+    # Домен берём фиксированный: тест проверяет сборку ссылки, а не .env
+    saved_public = settings.public_webhook_url
+    settings.public_webhook_url = "https://example.test/"
+    failures += not check(
+        "ссылка на фото собирается публичной",
+        settings.public_media_url("catalog/AV-10004515/01.jpg")
+        == "https://example.test/catalog/AV-10004515/01.jpg",
+        settings.public_media_url("catalog/AV-10004515/01.jpg"),
+    )
+    settings.public_webhook_url = ""
+    failures += not check(
+        "без домена ссылку не выдумываем",
+        settings.public_media_url("catalog/AV-10004515/01.jpg") == "",
+    )
+    settings.public_webhook_url = saved_public
+
+    media_mod.download, tr_mod.transcribe_bytes = orig_download, orig_transcribe
+    settings.vision_enabled = False
+
     await orch.shutdown()
     print("\n" + "=" * 52)
     if failures:

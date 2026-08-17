@@ -51,6 +51,26 @@ class MaxNotifier:
         )
         return await self.send(body)
 
+    async def price_overdue(
+        self,
+        *,
+        chat_id: str,
+        request_id: str,
+        ask: str,
+        age_hours: float,
+    ) -> bool:
+        """Расчёт висит без ответа — клиент ждёт нас, дожимать его нельзя."""
+        body = (
+            "⏰ Расчёт всё ещё не отправлен\n"
+            f"request_id: {request_id}\n"
+            f"Чат: {chat_id}\n"
+            f"Ждёт: {age_hours:.1f} ч\n\n"
+            f"Запрос:\n{ask}\n\n"
+            "Клиенту мы пока ничего не написали и напоминать ему не будем — "
+            "ответьте сюда ценой, и бот перешлёт её."
+        )
+        return await self.send(body)
+
     async def avito_show_phone(self, *, chat_id: str, details: str = "") -> bool:
         """Клиенту не пишем — только уведомление владельцу в MAX."""
         body = (

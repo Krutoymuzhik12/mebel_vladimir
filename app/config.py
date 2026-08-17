@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     transcription_provider: str = "auto"
     whisper_model: str = "small"
     openai_api_key: str = ""
+    poe_whisper_bot: str = "Gemini-2.5-Flash"
+    # Больше 25 МБ голосовых не бывает, а качать чужие ссылки без предела нельзя
+    media_max_bytes: int = 26_214_400
+
+    # Показывать клиенту фото найденных позиций каталога
+    send_catalog_photos: bool = True
+    catalog_photos_limit: int = 3
 
     vision_enabled: bool = False
     vision_api_url: str = "http://127.0.0.1:8090"
@@ -96,6 +103,19 @@ class Settings(BaseSettings):
     @property
     def test_chat_type_set(self) -> set[str]:
         return self._csv_set(self.test_chat_types)
+
+    def public_media_url(self, rel_path: str) -> str:
+        """Ссылка на файл каталога, которую примет Wazzup.
+
+        Wazzup скачивает вложение сам, поэтому путь на диске ему не годится —
+        нужен публичный https. Каталог раздаёт тот же nginx, что и вебхук,
+        так что достаточно приклеить относительный путь к нашему домену.
+        """
+        base = (self.public_webhook_url or "").rstrip("/")
+        rel = (rel_path or "").replace("\\", "/").lstrip("/")
+        if not base or not rel:
+            return ""
+        return f"{base}/{rel}"
 
     @property
     def db_file(self) -> Path:
