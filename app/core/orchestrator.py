@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import secrets
 from typing import Any
 
 from app.config import Settings
 from app.core.batcher import MessageBatcher
 from app.core.dialog import DialogService
-from app.core.gatekeeper import BOT_OWNED, Gatekeeper
+from app.core.gatekeeper import BOT_OWNED, START_CMD, STOP_CMD, Gatekeeper
 from app.core.quiet_hours import QuietHours
 from app.db.database import Database
 from app.jobs.avito_show_phone import AvitoShowPhoneJob
@@ -52,31 +53,79 @@ class Orchestrator:
     async def shutdown(self) -> None:
         for t in self._bg_tasks:
             t.cancel()
+        await self.wazzup.aclose()
 
-    def verify_webhook(self, request_headers: dict[str, str], body: bytes) -> bool:
-        """Если секрет задан — требуем совпадение заголовка. Без секрета — warning."""
+    def verify_webhook(
+        self,
+        request_headers: dict[str, str],
+        body: bytes,
+        path_secret: str | None = None,
+    ) -> bool:
+        """Проверка секрета.
+
+        Wazzup не умеет слать произвольный заголовок — штатный способ защиты это
+        секрет в самом URL вебхука (/webhooks/wazzup/<secret>). Заголовок тоже
+        принимаем: удобно для ручных тестов через curl.
+        """
         _ = body
         secret = (self.settings.wazzup_webhook_secret or "").strip()
         if not secret:
-            logger.warning("wazzup webhook secret not set — accepting (configure before prod)")
+            logger.warning(
+                "WAZZUP_WEBHOOK_SECRET не задан — принимаю без проверки "
+                "(задайте перед боевым запуском)"
+            )
             return True
-        provided = (
-            request_headers.get("x-wazzup-secret")
-            or request_headers.get("x-webhook-secret")
-            or request_headers.get("authorization", "").removeprefix("Bearer ").strip()
+        candidates = [
+            path_secret or "",
+            request_headers.get("x-wazzup-secret", ""),
+            request_headers.get("x-webhook-secret", ""),
+            request_headers.get("authorization", "").removeprefix("Bearer ").strip(),
+        ]
+        return any(
+            candidate and secrets.compare_digest(candidate, secret)
+            for candidate in candidates
         )
-        return bool(provided) and secrets.compare_digest(provided, secret)
 
     async def handle_webhook_payload(self, payload: dict[str, Any]) -> None:
+        # Wazzup проверяет URL тестовым запросом при подписке
+        if payload.get("test") is True:
+            logger.info("wazzup: проверочный запрос вебхука — ok")
+            return
         messages = self.wazzup.parse_webhook(payload)
+        if not messages:
+            logger.info("wazzup: в payload нет сообщений для обработки")
+            return
         for msg in messages:
-            await self.ingest(msg)
+            try:
+                await self.ingest(msg)
+            except Exception:
+                logger.exception("ingest failed chat=%s", msg.chat_id)
 
     async def ingest(self, msg: IncomingMessage) -> None:
+        # Тестовый режим: слушаем только разрешённые каналы
+        if not self.wazzup.channel_allowed(msg.channel_id, msg.channel):
+            logger.info(
+                "skip (тестовый режим) chat=%s channel_id=%s type=%s",
+                msg.chat_id,
+                msg.channel_id,
+                msg.channel,
+            )
+            return
+
         if msg.message_id and self.db.seen_message(msg.message_id):
             return
         if msg.message_id:
             self.db.mark_seen(msg.message_id, msg.chat_id)
+
+        # Запоминаем, куда отвечать: без channelId+chatType Wazzup ответ не примет
+        self.db.remember_route(
+            msg.chat_id, channel_id=msg.channel_id, chat_type=msg.channel
+        )
+
+        # Исходящее не через наш API — менеджер написал руками / #стоп / #старт
+        if msg.is_echo:
+            await self._on_staff_echo(msg)
+            return
 
         # Авито show-phone — в MAX, клиенту не отвечаем
         if self.wazzup.looks_like_avito_show_phone(msg):
@@ -85,7 +134,7 @@ class Orchestrator:
 
         status = self.gate.status(msg.chat_id)
         if status is None:
-            # до ключей Wazzup считаем новое входящее первым контактом
+            # незнакомый чат: первое входящее считаем первым контактом
             status = self.gate.classify_first_seen(
                 msg.chat_id, had_prior_human_outgoing=False
             )
@@ -104,19 +153,63 @@ class Orchestrator:
         )
         await self.batcher.add(msg)
 
+    async def _on_staff_echo(self, msg: IncomingMessage) -> None:
+        """Исходящее, отправленное не через наш API.
+
+        Wazzup помечает isEcho и для наших сообщений в некоторых каналах, поэтому
+        сначала отсекаем собственные реплики по тексту — иначе бот сам себя
+        переведёт в manual и замолчит.
+        """
+        text = (msg.text or "").strip()
+        if not text:
+            return
+
+        recent = self.db.recent_messages(chat_id=msg.chat_id, limit=10)
+        own = {
+            (r.get("text") or "").strip()
+            for r in recent
+            if r.get("role") == "assistant" and r.get("text")
+        }
+        if text in own:
+            logger.debug("echo нашего же сообщения chat=%s — игнор", msg.chat_id)
+            return
+
+        normalized = text.lower()
+        is_command = normalized in {STOP_CMD, START_CMD}
+        if not is_command and not self.settings.staff_takeover_on_echo:
+            logger.info(
+                "staff echo chat=%s — перехват выключен (STAFF_TAKEOVER_ON_ECHO=0)",
+                msg.chat_id,
+            )
+            return
+
+        new_status = self.gate.on_staff_message(msg.chat_id, text)
+        logger.info(
+            "staff message chat=%s author=%s → status=%s",
+            msg.chat_id,
+            msg.author_name or "?",
+            new_status,
+        )
+
     async def _on_batch(self, chat_id: str, messages: list[IncomingMessage]) -> None:
         if not self.gate.bot_may_reply(chat_id):
             return
         result = await self.dialog.handle(chat_id, messages)
-        if result.markers.price_request:
+        if result.extracted:
+            self.db.merge_facts(chat_id, result.extracted)
+        if result.wants_price or result.markers.price_request:
             history = self.db.recent_messages(chat_id, self.settings.history_limit)
             summary = "\n".join(
                 f"{m['role']}: {m['text']}" for m in history if m.get("text")
             )[-2000:]
+            ask = result.markers.price_request or (
+                result.extracted.get("furniture")
+                and f"расчёт: {result.extracted.get('furniture')}"
+            ) or "клиент спрашивает стоимость"
             await self.price_relay.on_client_wants_price(
                 chat_id=chat_id,
                 summary=summary or "(нет истории)",
-                ask=result.markers.price_request,
+                ask=str(ask),
             )
         if result.markers.operator:
             self.db.upsert_chat(chat_id, status="manual")
@@ -124,10 +217,32 @@ class Orchestrator:
             return
         if not result.reply:
             return
+
+        await self._human_pause()
         send = await self.wazzup.send_text(chat_id, result.reply)
         if send.ok:
-            self.db.add_message(chat_id, role="assistant", text=result.reply)
+            self.db.add_message(
+                chat_id,
+                role="assistant",
+                text=result.reply,
+                external_id=send.external_id or None,
+            )
+            # свой же message_id — чтобы эхо не приняли за ответ менеджера
+            if send.external_id:
+                self.db.mark_seen(send.external_id, chat_id)
             self.db.touch_bot_message(chat_id)
+        else:
+            logger.error("reply not sent chat=%s err=%s", chat_id, send.error)
+
+    async def _human_pause(self) -> None:
+        """Пауза перед ответом — чтобы бот не отвечал мгновенно."""
+        if self.settings.fast_mode:
+            return
+        low = max(0.0, self.settings.reply_delay_min_sec)
+        high = max(low, self.settings.reply_delay_max_sec)
+        if high <= 0:
+            return
+        await asyncio.sleep(random.uniform(low, high))
 
     async def _followup_loop(self) -> None:
         while True:

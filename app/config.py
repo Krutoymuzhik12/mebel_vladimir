@@ -25,11 +25,27 @@ class Settings(BaseSettings):
     wazzup_api_key: str = ""
     wazzup_webhook_secret: str = ""
     wazzup_api_base: str = "https://api.wazzup24.com"
+    # Публичный URL сервиса — нужен, чтобы зарегистрировать webhook в Wazzup
+    public_webhook_url: str = ""
+
+    # ---------- Тестовый режим ----------
+    # 1 — слушаем только каналы из test_channel_ids / test_chat_types
+    test_mode: bool = False
+    # UUID каналов Wazzup через запятую (узнать: python -m scripts.wazzup_channels)
+    test_channel_ids: str = ""
+    # Типы чатов через запятую: telegram, whatsapp, avito, instagram, vk, max
+    test_chat_types: str = ""
+    # Логировать сырой payload вебхука целиком (для разбора форматов)
+    log_raw_webhook: bool = False
+    # 0 — «сухой» прогон: считаем ответ, но не отправляем клиенту
+    wazzup_send_enabled: bool = True
+    # Менеджер ответил руками (isEcho) → чат уходит в manual
+    staff_takeover_on_echo: bool = True
 
     poe_api_key: str = ""
     poe_base_url: str = "https://api.poe.com/v1"
-    poe_manager_bot: str = ""
-    poe_classifier_bot: str = ""
+    poe_manager_bot: str = "Vladimir_dialog"
+    poe_classifier_bot: str = "Vladimir_Intent"
     send_system_prompts: bool = False
     history_limit: int = 40
     confidence_threshold: float = 0.6
@@ -64,6 +80,18 @@ class Settings(BaseSettings):
 
     db_path: str = "data/bot.db"
     log_path: str = "data/bot.log"
+
+    @staticmethod
+    def _csv_set(raw: str) -> set[str]:
+        return {part.strip().lower() for part in (raw or "").split(",") if part.strip()}
+
+    @property
+    def test_channel_id_set(self) -> set[str]:
+        return self._csv_set(self.test_channel_ids)
+
+    @property
+    def test_chat_type_set(self) -> set[str]:
+        return self._csv_set(self.test_chat_types)
 
     @property
     def db_file(self) -> Path:

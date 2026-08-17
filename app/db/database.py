@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 CHAT_COLUMNS = frozenset(
     {
         "status",
         "channel",
+        # Роутинг ответа в Wazzup: без них отправить сообщение нельзя
+        "channel_id",
+        "chat_type",
+        # Накопленные факты о клиенте (JSON)
+        "facts",
         "last_user_msg_at",
         "last_bot_msg_at",
         "followup_stage",
@@ -19,6 +28,13 @@ CHAT_COLUMNS = frozenset(
         "show_phone_at",
         "show_phone_notified",
     }
+)
+
+# Колонки, добавленные после первой версии схемы — доливаем ALTER-ом
+_MIGRATIONS = (
+    ("chats", "channel_id", "TEXT"),
+    ("chats", "chat_type", "TEXT"),
+    ("chats", "facts", "TEXT"),
 )
 
 
@@ -43,6 +59,7 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+        self._migrate()
 
     @contextmanager
     def _conn(self):
@@ -106,6 +123,17 @@ class Database:
                     ON messages(chat_id, id);
                 """
             )
+
+    def _migrate(self) -> None:
+        """Доливает колонки, появившиеся после первой версии схемы."""
+        with self._conn() as conn:
+            for table, column, coltype in _MIGRATIONS:
+                existing = {
+                    r["name"] for r in conn.execute(f"PRAGMA table_info({table})")
+                }
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+                    logger.info("migration: %s.%s added", table, column)
 
     def get_chat(self, chat_id: str) -> dict[str, Any] | None:
         with self._conn() as conn:
@@ -203,6 +231,45 @@ class Database:
                 (chat_id, limit),
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    def remember_route(
+        self, chat_id: str, *, channel_id: str, chat_type: str, channel: str = ""
+    ) -> None:
+        """Куда отвечать: без channel_id/chat_type Wazzup сообщение не примет."""
+        if not channel_id and not chat_type:
+            return
+        fields: dict[str, Any] = {}
+        if channel_id:
+            fields["channel_id"] = channel_id
+        if chat_type:
+            fields["chat_type"] = chat_type
+            fields["channel"] = channel or chat_type
+        self.upsert_chat(chat_id, **fields)
+
+    def get_route(self, chat_id: str) -> tuple[str, str]:
+        row = self.get_chat(chat_id)
+        if not row:
+            return "", ""
+        return (row.get("channel_id") or "", row.get("chat_type") or "")
+
+    def get_facts(self, chat_id: str) -> dict[str, Any]:
+        row = self.get_chat(chat_id)
+        if not row or not row.get("facts"):
+            return {}
+        try:
+            data = json.loads(row["facts"])
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def merge_facts(self, chat_id: str, new_facts: dict[str, Any]) -> dict[str, Any]:
+        """Копим факты о клиенте между сообщениями: новые непустые перетирают старые."""
+        clean = {k: v for k, v in (new_facts or {}).items() if v not in (None, "", [])}
+        if not clean:
+            return self.get_facts(chat_id)
+        merged = {**self.get_facts(chat_id), **clean}
+        self.upsert_chat(chat_id, facts=json.dumps(merged, ensure_ascii=False))
+        return merged
 
     def touch_user_message(self, chat_id: str) -> None:
         self.upsert_chat(

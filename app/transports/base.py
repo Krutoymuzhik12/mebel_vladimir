@@ -16,6 +16,13 @@ class IncomingMessage:
     # image | voice | system | text
     kind: str = "text"
     channel: str = ""  # whatsapp, avito, telegram, ...
+    # UUID канала Wazzup — обязателен, чтобы отправить ответ обратно
+    channel_id: str = ""
+    # Исходящее, отправленное НЕ через наш API (менеджер написал руками)
+    is_echo: bool = False
+    # Имя автора исходящего (сотрудник) / контакта
+    author_name: str = ""
+    contact_name: str = ""
     # Системное событие площадки (например Авито «показ номера»)
     is_system: bool = False
     # Сырой payload — для отладки и уточнения форматов

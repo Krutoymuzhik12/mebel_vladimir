@@ -16,7 +16,45 @@ copy .env.example .env
 python -m app.main
 ```
 
-Webhook: `POST /webhooks/wazzup` (заголовок `X-Wazzup-Secret`, если задан в `.env`).
+## Тестовый режим (сейчас включён)
+
+Бот слушает **только** каналы из белого списка, остальные молча игнорирует.
+
+```bash
+# 1. узнать channelId нужного канала
+python -m scripts.wazzup_channels
+
+# 2. в .env
+TEST_MODE=1
+TEST_CHANNEL_IDS=<channelId телеграм-бота>
+```
+
+`TEST_CHAT_TYPES=telegram` — запасной вариант, если фильтровать по типу канала,
+а не по конкретному UUID. Достаточно совпадения по любому из двух списков.
+
+Выключить тестовый режим (слушать все каналы): `TEST_MODE=0`.
+Посчитать ответ, но не отправлять клиенту: `WAZZUP_SEND_ENABLED=0`.
+
+## Проверка без сервера
+
+```bash
+python -m scripts.selftest            # конвейер целиком, без сети
+python -m scripts.selftest --with-poe # с реальным вызовом Poe
+```
+
+## Webhook
+
+`POST /webhooks/wazzup/<WAZZUP_WEBHOOK_SECRET>` — рабочий путь: Wazzup не умеет
+слать произвольные заголовки, поэтому секрет живёт в самом URL.
+`POST /webhooks/wazzup` с заголовком `X-Wazzup-Secret` — для ручных тестов.
+
+```bash
+# сервис уже должен быть поднят и доступен снаружи по https
+python -m scripts.wazzup_webhook        # показать текущую подписку
+python -m scripts.wazzup_webhook --set  # записать PUBLIC_WEBHOOK_URL
+```
+
+Состояние сервиса: `GET /health` (видно ключи, тестовый режим, список каналов).
 
 ## Каталог / Vision
 
