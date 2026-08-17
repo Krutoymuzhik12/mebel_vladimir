@@ -50,10 +50,10 @@ class Settings(BaseSettings):
     poe_base_url: str = "https://api.poe.com/v1"
     poe_manager_bot: str = "Vladimir_dialog"
     poe_classifier_bot: str = "Vladimir_Intent"
-    # У ботов на Poe своих промптов нет: без этого классификатор выдумывает
-    # имена интентов, а менеджер отвечает как обычный ассистент. Промпты
-    # лежат в prompts/ и версионируются вместе с кодом.
-    send_system_prompts: bool = True
+    # Промпты живут в самих ботах на Poe, а не в коде. Отсюда уходит только
+    # история переписки, факты о клиенте и вложения.
+    # Файлы в prompts/ — исходники, которые вставляются в ботов вручную.
+    send_system_prompts: bool = False
     history_limit: int = 40
     confidence_threshold: float = 0.6
 
