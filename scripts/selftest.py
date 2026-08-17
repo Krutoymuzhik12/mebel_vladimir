@@ -510,10 +510,19 @@ async def main(argv: list[str]) -> int:
     failures += not check("заявка А заведена", bool(rid_a), str(rid_a))
     failures += not check("карточка ушла в MAX", len(fake_max.cards) == 1)
 
+    cards_before = len(fake_max.cards)
     await inbox.handle_update(cb(f"{ANSWER_PREFIX}{rid_a}"))
     failures += not check(
         "после «Ответить» ждём текст",
         db.get_awaiting(MAX_CHAT, "7001") == rid_a,
+    )
+    # Всплывашку MAX не показывает, поэтому нажатие обязано оставить
+    # видимое сообщение — иначе сотрудник решит, что кнопка не сработала
+    failures += not check(
+        "нажатие видно в чате",
+        len(fake_max.cards) == cards_before + 1
+        and "Жду ваш ответ" in fake_max.cards[-1],
+        fake_max.cards[-1][:50] if fake_max.cards else "нет сообщений",
     )
 
     # Пока сотрудник печатает ответ по А, второй клиент тоже просит расчёт.
@@ -546,6 +555,11 @@ async def main(argv: list[str]) -> int:
     )
     failures += not check(
         "ожидание снято", db.get_awaiting(MAX_CHAT, "7001") is None
+    )
+    failures += not check(
+        "подтверждение называет чат клиента",
+        "555000111" in fake_max.cards[-1],
+        fake_max.cards[-1][:60],
     )
 
     # Второй сотрудник отвечает реплаем на карточку — без всякой кнопки

@@ -133,9 +133,15 @@ class MaxInbox:
             logger.info(
                 "MAX: сотрудник %s отвечает на заявку %s", user_id, request_id
             )
-            await self.max.answer_callback(
-                callback_id,
-                "Напишите ответ следующим сообщением — отправлю клиенту как есть",
+            await self.max.answer_callback(callback_id, "Жду ваш ответ")
+            # Всплывашку из answer_callback MAX не показывает, поэтому пишем
+            # обычным сообщением — иначе нажатие выглядит как «ничего не
+            # произошло», и сотрудник жмёт кнопку повторно.
+            await self.max.send(
+                "✍️ Жду ваш ответ по заявке "
+                f"{request_id}\nКлиент: {row.get('chat_id')}\n\n"
+                "Напишите сообщение — отправлю его клиенту как есть. "
+                "Чтобы отменить, нажмите «Пропустить» на карточке."
             )
             return
 
@@ -170,14 +176,17 @@ class MaxInbox:
             # обычная переписка сотрудников — не наше дело
             return
 
+        row = self.db.get_price_by_request_id(request_id)
+        client_chat = str((row or {}).get("chat_id") or "?")
+
         ok = await self.price_relay.on_owner_max_message(text, request_id=request_id)
         if ok:
             self.db.clear_awaiting(chat_id, user_id)
-            await self.max.send(f"✅ Отправлено клиенту (заявка {request_id})")
+            await self.max.send(f"✅ Отправлено клиенту {client_chat}")
         else:
             await self.max.send(
-                f"⚠️ Не удалось отправить клиенту (заявка {request_id}). "
-                "Проверьте, что чат ещё активен."
+                f"⚠️ Не удалось отправить клиенту {client_chat} "
+                f"(заявка {request_id}). Проверьте, что чат ещё активен."
             )
 
     def _request_for(
