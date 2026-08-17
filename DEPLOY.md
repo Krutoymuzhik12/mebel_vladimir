@@ -96,7 +96,7 @@ systemctl status osnova --no-pager
 sed "s/SERVER_DOMAIN/$SERVER_DOMAIN/" /var/opt/vladimir_mebel/deploy/nginx.conf \
   > /etc/nginx/sites-available/osnova
 ln -sf /etc/nginx/sites-available/osnova /etc/nginx/sites-enabled/osnova
-rm -f /etc/nginx/sites-enabled/default
+# Чужие конфиги не трогаем: на сервере живут другие проекты
 nginx -t && systemctl reload nginx
 
 certbot --nginx -d "$SERVER_DOMAIN" --agree-tos -m you@example.com --redirect -n
