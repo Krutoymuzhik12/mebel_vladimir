@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     message_batch_settle_sec: float = 0.8
     message_batch_tail_wait_sec: float = 4.0
     message_batch_max_wait_sec: float = 30.0
+    # Пауза после фото/голосового — клиент часто дописывает условие следом
+    message_batch_media_wait_sec: float = 12.0
 
     transcription_provider: str = "auto"
     whisper_model: str = "small"

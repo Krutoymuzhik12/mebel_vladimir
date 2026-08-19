@@ -410,7 +410,8 @@ async def main(argv: list[str]) -> int:
 
     settings.vision_enabled = True
 
-    async def _fake_search(data, *, filename="photo.jpg", top_k=5, colors=None):
+    async def _fake_search(data, *, filename="photo.jpg", top_k=5,
+                           colors=None, types=None):
         return {
             "found": True,
             "matches": [
@@ -603,6 +604,57 @@ async def main(argv: list[str]) -> int:
 
     settings.max_enabled = False
     settings.max_bot_token = ""
+
+    print("\n=== 13. Подбор по каталогу ===")
+    from app.catalog import vocab as cat_vocab
+    from app.catalog.search import shared as catalog_shared
+
+    cat = catalog_shared()
+    failures += not check("каталог загружен", cat.loaded, f"{cat.size} позиций")
+
+    if cat.loaded:
+        corner = cat.search("какие угловые диваны у вас бывают?", limit=3)
+        failures += not check("угловые диваны найдены", len(corner) == 3)
+        failures += not check(
+            "все выданные — угловые диваны",
+            all(i["type"] == "диван" and "угловой" in i["features"] for i in corner),
+            ", ".join(f"{i['type']}/{i['features']}" for i in corner)[:80],
+        )
+
+        # Ровно тот случай, о котором просил клиент: белая столешница не
+        # должна приводить к белому дивану
+        tops = cat.search("нужна белая столешница", limit=3)
+        failures += not check(
+            "белая столешница ведёт к столам, а не к диванам",
+            bool(tops) and all(i["type"] == "стол" for i in tops),
+            ", ".join(i["type"] for i in tops) or "пусто",
+        )
+
+        failures += not check(
+            "«бельевой короб» не считается белым цветом",
+            "белый" not in cat_vocab.detect_colors("диван с бельевым коробом"),
+        )
+        failures += not check(
+            "морфология: «угловые» = «угловой»",
+            "угловой" in cat_vocab.detect_features("какие угловые бывают"),
+        )
+        failures += not check(
+            "неизвестный тип не подменяется другим",
+            cat.search("нужен аквариум", furniture="аквариум") == [],
+        )
+
+        picked = orch.dialog._pick_from_catalog(
+            "покажите угловые диваны", "catalog_request", {}, {"furniture": "диван"}
+        )
+        failures += not check("диалог подбирает под catalog_request", len(picked) == 3)
+        failures += not check(
+            "на приветствие каталог не вываливается",
+            orch.dialog._pick_from_catalog("здравствуйте", "greeting", {}, {}) == [],
+        )
+        failures += not check(
+            "у подобранного есть ссылка на фото",
+            bool(picked and picked[0].get("photos")),
+        )
 
     await orch.shutdown()
     print("\n" + "=" * 52)

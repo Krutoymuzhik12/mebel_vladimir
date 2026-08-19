@@ -39,13 +39,20 @@ class VisionClient:
         filename: str = "photo.jpg",
         top_k: int = 5,
         colors: str | None = None,
+        types: str | None = None,
     ) -> dict[str, Any]:
-        """Фото приходит из вебхука в памяти — на диск его класть незачем."""
+        """Фото приходит из вебхука в памяти — на диск его класть незачем.
+
+        types — тип мебели из переписки. Это главный рычаг качества: без него
+        похожие по цвету, но разные по сути вещи лезут в выдачу.
+        """
         if not self.enabled:
             return {"found": False, "matches": [], "error": "vision disabled"}
         form: dict[str, Any] = {"top_k": str(top_k)}
         if colors:
             form["colors"] = colors
+        if types:
+            form["types"] = types
         async with httpx.AsyncClient(timeout=60.0) as client:
             files = {"file": (filename, data, "image/jpeg")}
             r = await client.post(f"{self.base_url}/search", data=form, files=files)

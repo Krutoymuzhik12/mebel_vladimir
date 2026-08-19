@@ -34,6 +34,7 @@ async def search(
     threshold: float = SIMILARITY_THRESHOLD,
     top_k: int = TOP_K,
     colors: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
 ):
     raw = await file.read()
     if len(raw) > 8_000_000:
@@ -45,11 +46,16 @@ async def search(
 
     vec = embed(img, cut_bg=True)
     color_list = _parse_colors(colors)
-    query_filter = None
+    type_list = _parse_colors(types)
+    # Тип мебели отсекает кандидатов ДО сравнения векторов. Фото белой
+    # столешницы по пикселям похоже на белый диван, и без этого фильтра
+    # выдача выглядит случайной.
+    conditions = []
+    if type_list:
+        conditions.append(FieldCondition(key="type", match=MatchAny(any=type_list)))
     if color_list:
-        query_filter = Filter(
-            must=[FieldCondition(key="colors", match=MatchAny(any=color_list))]
-        )
+        conditions.append(FieldCondition(key="colors", match=MatchAny(any=color_list)))
+    query_filter = Filter(must=conditions) if conditions else None
 
     try:
         hits = qc.query_points(
@@ -76,6 +82,9 @@ async def search(
             "article": a,
             "similarity": round(s, 3),
             "photo_path": best_payload[a].get("photo_path", ""),
+            "photos": [best_payload[a].get("photo_url")]
+            if best_payload[a].get("photo_url") else [],
+            "features": best_payload[a].get("features") or [],
             "colors": best_payload[a].get("colors") or [],
             "name": best_payload[a].get("name") or a,
             "type": best_payload[a].get("type") or "",
@@ -85,7 +94,8 @@ async def search(
         if s >= threshold
     ][: max(1, min(top_k, 10))]
 
-    return {"found": bool(results), "matches": results, "color_filter": color_list}
+    return {"found": bool(results), "matches": results,
+            "color_filter": color_list, "type_filter": type_list}
 
 
 @app.get("/health")

@@ -1,16 +1,28 @@
-"""Индексация catalog/ → Qdrant (DINOv2 + rembg на индексе для максимального качества)."""
+"""catalog/index.json → Qdrant.
+
+Индексируем по новому каталогу: фото лежат не на диске, а на VK CDN, поэтому
+качаем их один раз в data/catalog_photos/ и переиспользуем при пересборке.
+
+В payload кладём тип, цвет и признаки — по ним поиск фильтрует кандидатов до
+сравнения векторов. Без этого фото белой столешницы уверенно матчится с белым
+диваном: по пикселям они и правда похожи, а клиенту это выглядит издевательством.
+
+    python -m app.vision.index_catalog --force
+"""
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 
+import httpx
 from PIL import Image
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from app.vision.config import (
-    CATALOG_PATH,
     CUT_BG_ON_INDEX,
     EMBED_DIM,
     QDRANT_COLLECTION,
@@ -18,96 +30,94 @@ from app.vision.config import (
 )
 from app.vision.embedder import embed
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+ROOT = Path(__file__).resolve().parents[2]
+INDEX_JSON = ROOT / "catalog" / "index.json"
+PHOTO_DIR = ROOT / "data" / "catalog_photos"
+DOWNLOAD_TIMEOUT = 30.0
 
 
-def _load_meta(art_dir: Path) -> dict:
-    p = art_dir / "meta.json"
-    if not p.exists():
-        return {}
+def cached_photo(url: str) -> Path | None:
+    """Скачать фото один раз. Имя файла — от ссылки, чтобы не качать повторно."""
+    PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20] + ".jpg"
+    path = PHOTO_DIR / name
+    if path.exists() and path.stat().st_size > 2000:
+        return path
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT,
+                          follow_redirects=True) as resp:
+            resp.raise_for_status()
+            with path.open("wb") as f:
+                for chunk in resp.iter_bytes():
+                    f.write(chunk)
+    except (httpx.HTTPError, OSError):
+        path.unlink(missing_ok=True)
+        return None
+    return path if path.stat().st_size > 2000 else None
 
 
-def main() -> None:
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Index catalog → Qdrant")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="удалить и пересоздать коллекцию (иначе отказ если уже есть)",
-    )
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Индексация каталога в Qdrant")
+    parser.add_argument("--force", action="store_true",
+                        help="пересоздать коллекцию")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="сколько позиций взять (для пробного прогона)")
     args = parser.parse_args()
 
-    if not CATALOG_PATH.is_dir():
-        sys.exit(f"Каталог не найден: {CATALOG_PATH}")
+    if not INDEX_JSON.is_file():
+        return int(bool(print(f"Нет {INDEX_JSON} — сначала python -m scripts.build_catalog")))
+
+    items = json.loads(INDEX_JSON.read_text(encoding="utf-8"))
+    if args.limit:
+        items = items[: args.limit]
 
     qc = make_qdrant_client()
     if qc.collection_exists(QDRANT_COLLECTION):
         if not args.force:
-            sys.exit(
-                f"Коллекция '{QDRANT_COLLECTION}' уже есть. "
-                "Передайте --force для полной пересборки или используйте index_missing."
-            )
+            print(f"Коллекция '{QDRANT_COLLECTION}' уже есть, нужен --force")
+            return 1
         qc.delete_collection(QDRANT_COLLECTION)
     qc.create_collection(
         collection_name=QDRANT_COLLECTION,
         vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
     )
 
-    articles = [d for d in sorted(CATALOG_PATH.iterdir()) if d.is_dir()]
-    if not articles:
-        sys.exit(f"В {CATALOG_PATH} нет папок артикулов")
-
     points: list[PointStruct] = []
     point_id = 0
     skipped = 0
 
-    for i, art_dir in enumerate(articles, start=1):
-        meta = _load_meta(art_dir)
+    for n, item in enumerate(items, start=1):
         payload_base = {
-            "article": art_dir.name,
-            "colors": list(meta.get("colors") or []),
-            "type": meta.get("type") or "",
-            "name": meta.get("name") or art_dir.name,
-            "price": meta.get("price") or "",
-            "category": meta.get("category") or "",
+            "article": item.get("article", ""),
+            "name": item.get("name", ""),
+            # По этим полям поиск отсекает заведомо не ту мебель
+            "type": item.get("type", ""),
+            "colors": item.get("colors") or [],
+            "features": item.get("features") or [],
+            "price": item.get("price") or 0,
+            "price_text": item.get("price_text", ""),
         }
-        photos = [
-            p
-            for p in sorted(art_dir.iterdir())
-            if p.suffix.lower() in IMAGE_EXTS and p.stat().st_size >= 4_000
-        ]
-        for photo in photos:
-            try:
-                vec = embed(Image.open(photo), cut_bg=CUT_BG_ON_INDEX)
-            except Exception as exc:
-                print(f"  [skip] {photo}: {exc}", flush=True)
+        for url in (item.get("photos") or [])[:3]:
+            path = cached_photo(url)
+            if path is None:
                 skipped += 1
                 continue
-            points.append(
-                PointStruct(
-                    id=point_id,
-                    vector=vec.tolist(),
-                    payload={
-                        **payload_base,
-                        "photo_path": str(photo.relative_to(CATALOG_PATH.parent)).replace(
-                            "\\", "/"
-                        ),
-                    },
-                )
-            )
+            try:
+                vec = embed(Image.open(path), cut_bg=CUT_BG_ON_INDEX)
+            except Exception as exc:
+                print(f"  [skip] {item.get('article')}: {exc}", flush=True)
+                skipped += 1
+                continue
+            points.append(PointStruct(
+                id=point_id,
+                vector=vec.tolist(),
+                payload={**payload_base, "photo_url": url},
+            ))
             point_id += 1
 
-        if i % 25 == 0 or i == len(articles):
-            print(
-                f"[{i}/{len(articles)}] vectors={point_id} last={art_dir.name}",
-                flush=True,
-            )
-
+        if n % 25 == 0 or n == len(items):
+            print(f"[{n}/{len(items)}] векторов={point_id} пропущено={skipped}",
+                  flush=True)
         if len(points) >= 64:
             qc.upsert(collection_name=QDRANT_COLLECTION, points=points)
             points = []
@@ -115,11 +125,9 @@ def main() -> None:
     if points:
         qc.upsert(collection_name=QDRANT_COLLECTION, points=points)
 
-    print(
-        f"Готово: {point_id} векторов в '{QDRANT_COLLECTION}', skipped={skipped}",
-        flush=True,
-    )
+    print(f"Готово: {point_id} векторов в '{QDRANT_COLLECTION}', пропущено {skipped}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

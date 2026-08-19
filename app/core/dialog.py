@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from app.catalog import search as catalog_search
+from app.catalog import vocab
 from app.config import settings
 from app.core.markers import Markers, extract
 from app.db.database import Database
@@ -69,6 +71,7 @@ class DialogService:
         self.db = db
         self.poe = poe or PoeClient()
         self.vision = VisionClient()
+        self.catalog = catalog_search.shared()
 
     async def _read_voice(
         self, messages: list[IncomingMessage]
@@ -115,9 +118,15 @@ class DialogService:
         return "\n".join(texts).strip(), hints
 
     async def _read_photos(
-        self, messages: list[IncomingMessage]
+        self, messages: list[IncomingMessage], furniture: str = ""
     ) -> tuple[list[str], list[dict[str, Any]]]:
-        """Фото клиента → похожие позиции каталога."""
+        """Фото клиента → похожие позиции каталога.
+
+        furniture — что за мебель обсуждают. Сужает поиск до нужного типа:
+        иначе фото столешницы найдёт белый диван, и это будет выглядеть
+        так, будто бот не смотрел на картинку.
+        """
+        wanted_type = vocab.type_from_client_words(furniture)
         photos = [m for m in messages if m.kind == "image" and m.media_url]
         if not photos:
             return [], []
@@ -137,6 +146,7 @@ class DialogService:
                     raw,
                     filename=f"photo{media.suffix_for(m.media_url, 'image')}",
                     top_k=settings.vision_top_k,
+                    types=wanted_type or None,
                 )
             except Exception:
                 logger.exception("vision: поиск не удался chat=%s", m.chat_id)
@@ -221,18 +231,89 @@ class DialogService:
 {message}
 """
 
+    def _pick_from_catalog(
+        self,
+        user_text: str,
+        intent: str | None,
+        known: dict[str, Any],
+        extracted: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Три подходящие позиции — или ничего.
+
+        Показываем не всегда: подборка уместна, когда клиент просит примеры
+        или обсуждает конкретную мебель. Вываливать каталог в ответ на
+        «здравствуйте» — верный способ выглядеть рассылкой.
+        """
+        if not self.catalog.loaded:
+            return []
+        if intent not in {"catalog_request", "product_question", "price_question",
+                          "qualification_answer"}:
+            return []
+
+        furniture = str(extracted.get("furniture") or known.get("furniture") or "")
+        # Тип обязателен: без него «покажите фото» вернёт случайные позиции
+        if not (furniture or vocab.type_from_client_words(user_text)):
+            return []
+
+        budget_raw = str(extracted.get("budget") or known.get("budget") or "")
+        digits = "".join(ch for ch in budget_raw if ch.isdigit())
+        budget = int(digits) if digits else 0
+        if 0 < budget < 1000:  # «до 150 тысяч» → 150
+            budget *= 1000
+
+        style = str(extracted.get("style") or known.get("style") or "")
+        found = self.catalog.search(
+            f"{user_text} {style}",
+            furniture=furniture,
+            colors=tuple(vocab.detect_colors(style)),
+            budget=budget,
+            limit=3,
+        )
+        if found:
+            logger.info(
+                "каталог: подобрано %s под intent=%s furniture=%r",
+                len(found), intent, furniture or user_text[:30],
+            )
+        return found
+
+    @staticmethod
+    def _catalog_hint(items: list[dict[str, Any]]) -> str:
+        lines = []
+        for i in items:
+            bits = [i.get("name") or i.get("article")]
+            if i.get("price"):
+                bits.append(f"от {i['price']:,} руб.".replace(",", " "))
+            if i.get("colors"):
+                bits.append("цвета: " + ", ".join(i["colors"][:3]))
+            if i.get("sizes"):
+                bits.append("размер " + i["sizes"][0])
+            lines.append("- " + "; ".join(str(b) for b in bits if b))
+        body = "\n".join(lines)
+        return (
+            "Система сейчас отправит клиенту фото этих позиций:\n"
+            f"{body}\n"
+            "Назови их коротко своими словами и спроси, что ближе. "
+            "Не выдумывай других моделей, цен и характеристик, кроме этих. "
+            "Фотографии описывать словами не нужно."
+        )
+
     async def handle(
         self, chat_id: str, messages: list[IncomingMessage]
     ) -> DialogResult:
         user_text = "\n".join(m.text for m in messages if m.text).strip()
         hints: list[str] = []
+        # Факты нужны раньше обычного: по ним сужаем поиск по фото до нужного
+        # типа мебели ещё до того, как классификатор скажет своё слово
+        known: dict[str, Any] = self._known_from_db(chat_id)
 
         voice_text, voice_hints = await self._read_voice(messages)
         hints += voice_hints
         if voice_text:
             user_text = f"{user_text}\n{voice_text}".strip()
 
-        photo_hints, matches = await self._read_photos(messages)
+        photo_hints, matches = await self._read_photos(
+            messages, furniture=f"{known.get('furniture') or ''} {user_text}"
+        )
         hints += photo_hints
 
         # Фото/голос без подписи: не отдаём в модель пустую строку
@@ -252,7 +333,6 @@ class DialogService:
         ]
         # текущий батч уже в БД как user — history его содержит
 
-        known: dict[str, Any] = self._known_from_db(chat_id)
         intent_name: str | None = None
         confidence = 0.0
         extracted: dict[str, Any] = {}
@@ -280,6 +360,14 @@ class DialogService:
                     confidence,
                     wants_price,
                 )
+
+        # Подборка из каталога. Фото клиента уже дало совпадения — тогда
+        # текстовый поиск не нужен, картинка точнее любых слов.
+        if not matches:
+            picked = self._pick_from_catalog(user_text, intent_name, known, extracted)
+            if picked:
+                matches = picked
+                hints.append(self._catalog_hint(picked))
 
         mode = "продолжение"
         if len(history_rows) <= max(1, len(messages)):

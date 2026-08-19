@@ -268,9 +268,14 @@ class Orchestrator:
         if not matches or not self.settings.send_catalog_photos:
             return
         for item in matches[: max(1, self.settings.catalog_photos_limit)]:
-            url = self.settings.public_media_url(str(item.get("photo_path") or ""))
+            # Новый каталог хранит прямые ссылки на фото — Wazzup заберёт их
+            # сам. Путь на диске остаётся запасным путём для старой выгрузки.
+            photos = item.get("photos") or []
+            url = str(photos[0]) if photos else self.settings.public_media_url(
+                str(item.get("photo_path") or "")
+            )
             if not url:
-                logger.info("фото каталога не отправлено: нет PUBLIC_WEBHOOK_URL")
+                logger.info("фото каталога не отправлено: нет ссылки")
                 return
             caption = str(item.get("name") or item.get("article") or "").strip()
             price = str(item.get("price") or "").strip()

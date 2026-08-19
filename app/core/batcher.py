@@ -49,6 +49,11 @@ class MessageBatcher:
         if self.settings.fast_mode:
             return 0.3
         quiet = self.settings.message_batch_wait_sec
+        # После фото или голосового ждём дольше: клиент почти всегда дописывает
+        # уточнение следом («а есть такой же, но в сером?»). Ответить на голую
+        # картинку и получить условие через две секунды — худший вариант.
+        if any(m.kind in {"image", "voice"} for m in bucket.messages):
+            quiet = max(quiet, self.settings.message_batch_media_wait_sec)
         max_wait = self.settings.message_batch_max_wait_sec
         elapsed = time.monotonic() - bucket.first_at
         remaining_cap = max(0.0, max_wait - elapsed)
