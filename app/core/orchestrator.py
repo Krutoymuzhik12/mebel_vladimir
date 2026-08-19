@@ -277,10 +277,7 @@ class Orchestrator:
             if not url:
                 logger.info("фото каталога не отправлено: нет ссылки")
                 return
-            caption = str(item.get("name") or item.get("article") or "").strip()
-            price = str(item.get("price") or "").strip()
-            if price:
-                caption = f"{caption} — {price}".strip(" —")
+            caption = self._photo_caption(item)
             send = await self.wazzup.send_media(chat_id, url, caption=caption)
             if send.ok:
                 self.db.add_message(chat_id, role="assistant", text=caption, kind="image")
@@ -293,6 +290,41 @@ class Orchestrator:
                     url,
                     send.error,
                 )
+
+    @staticmethod
+    def _photo_caption(item: dict[str, Any]) -> str:
+        """Подпись под фото.
+
+        Название модели клиенту ничего не говорит: «Дерби» и «Трансформер» —
+        внутренние имена. Работает картинка, а подпись должна отвечать на то,
+        что человек спросил бы следующим сообщением: сколько стоит и какое оно.
+        """
+        parts: list[str] = []
+        name = str(item.get("name") or item.get("article") or "").strip()
+        if name:
+            parts.append(name)
+
+        price = item.get("price")
+        price_text = str(item.get("price_text") or "").strip()
+        if isinstance(price, int) and price > 0:
+            parts.append(f"от {price:,} руб.".replace(",", " "))
+        elif price_text:
+            parts.append(f"от {price_text}")
+
+        details: list[str] = []
+        # Только то, что клиент назвал бы сам: форма, цвет, спальное место
+        for feature in (item.get("features") or [])[:2]:
+            details.append(str(feature))
+        colors = [str(c) for c in (item.get("colors") or [])[:2]]
+        if colors:
+            details.append("/".join(colors))
+        sizes = item.get("sizes") or []
+        if sizes:
+            details.append(str(sizes[0]))
+        if details:
+            parts.append(", ".join(details))
+
+        return " — ".join(parts)
 
     async def _human_pause(self) -> None:
         """Пауза перед ответом — чтобы бот не отвечал мгновенно."""

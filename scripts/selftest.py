@@ -656,6 +656,20 @@ async def main(argv: list[str]) -> int:
             bool(picked and picked[0].get("photos")),
         )
 
+        # Название модели клиенту ничего не говорит: подпись под фото обязана
+        # нести цену и признаки, иначе «Дерби» остаётся пустым звуком
+        caption = Orchestrator._photo_caption(picked[0]) if picked else ""
+        failures += not check(
+            "в подписи под фото есть цена",
+            "руб." in caption,
+            caption[:70],
+        )
+        failures += not check(
+            "в подписи есть признаки, а не только имя",
+            caption.count("—") >= 2,
+            caption[:70],
+        )
+
     await orch.shutdown()
     print("\n" + "=" * 52)
     if failures:
