@@ -364,6 +364,56 @@ async def main(argv: list[str]) -> int:
         "третьего дожима не бывает", len(wazzup.sent) == before
     )
 
+    # Клиент попросил вернуться через конкретный срок
+    from app.core.markers import extract as extract_markers
+
+    _clean, mk = extract_markers(
+        "Хорошо, напишу позже.\n[[ОТЛОЖИТЬ: 3 | клиент просил через 3 дня]]"
+    )
+    failures += not check("маркер отсрочки разобран", mk.snooze_days == 3, str(mk.snooze_days))
+    failures += not check(
+        "причина отсрочки сохранена",
+        (mk.snooze_reason or "").startswith("клиент просил"),
+        str(mk.snooze_reason),
+    )
+
+    _silent_for(100, "product_question")
+    db.snooze_chat("555000111", 3, "клиент просил через 3 дня")
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check(
+        "до оговорённого срока молчим, даже если пропал 100 часов назад",
+        len(wazzup.sent) == before,
+    )
+    chat = db.get_chat("555000111")
+    failures += not check(
+        "ступени сброшены договорённостью",
+        bool(chat) and int(chat.get("followup_stage") or 0) == 0,
+        str(chat.get("followup_stage") if chat else "нет"),
+    )
+
+    # Срок наступил
+    db.upsert_chat(
+        "555000111",
+        followup_due_at=(datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+    )
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    sent_snooze = wazzup.sent[before:]
+    failures += not check("в срок вернулись", len(sent_snooze) == 1)
+    if sent_snooze:
+        failures += not check(
+            "текст ссылается на договорённость",
+            "как и договаривались" in sent_snooze[0][1],
+            sent_snooze[0][1][:70],
+        )
+    chat = db.get_chat("555000111")
+    failures += not check(
+        "отсрочка снята после возврата",
+        bool(chat) and not chat.get("followup_due_at"),
+        str(chat.get("followup_due_at") if chat else "нет"),
+    )
+
     _silent_for(5, "refusal")
     before = len(wazzup.sent)
     await orch.followup_job.tick()

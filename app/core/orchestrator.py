@@ -237,6 +237,21 @@ class Orchestrator:
                 summary=summary or "(нет истории)",
                 ask=str(ask),
             )
+        # Клиент попросил вернуться в конкретный срок — маркер от менеджер-бота
+        if result.markers.snooze_days:
+            due = self.db.snooze_chat(
+                chat_id,
+                result.markers.snooze_days,
+                result.markers.snooze_reason or "",
+            )
+            logger.info(
+                "chat=%s отложен на %s дн. до %s (%s)",
+                chat_id,
+                result.markers.snooze_days,
+                due[:10],
+                result.markers.snooze_reason or "без причины",
+            )
+
         if result.markers.operator:
             self.db.upsert_chat(chat_id, status="manual")
             logger.info("chat=%s → manual (operator marker)", chat_id)

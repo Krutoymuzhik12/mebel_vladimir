@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,9 @@ CHAT_COLUMNS = frozenset(
         "last_intent",
         "followup_stage",
         "followup_last_sent_at",
+        # Клиент попросил вернуться в конкретный срок
+        "followup_due_at",
+        "snooze_reason",
         "show_phone_at",
         "show_phone_notified",
     }
@@ -41,6 +44,8 @@ _MIGRATIONS = (
     ("price_requests", "reminder_sent_at", "TEXT"),
     # mid карточки в MAX — по нему ловим ответ владельца реплаем
     ("price_requests", "max_message_id", "TEXT"),
+    ("chats", "followup_due_at", "TEXT"),
+    ("chats", "snooze_reason", "TEXT"),
 )
 
 
@@ -380,6 +385,25 @@ class Database:
                 "UPDATE price_requests SET reminder_sent_at=? WHERE request_id=?",
                 (_utc_now(), request_id),
             )
+
+    def snooze_chat(self, chat_id: str, days: int, reason: str = "") -> str:
+        """Клиент попросил вернуться через N дней.
+
+        Ступени дожима сбрасываем: договорённость о сроке отменяет лестницу,
+        которая шла до неё. Иначе человек, попросивший «напишите через
+        неделю», получит дежурное напоминание уже завтра.
+        """
+        due = datetime.now(timezone.utc) + timedelta(days=max(1, days))
+        self.upsert_chat(
+            chat_id,
+            followup_due_at=due.isoformat(),
+            snooze_reason=(reason or "")[:200],
+            followup_stage=0,
+        )
+        return due.isoformat()
+
+    def clear_snooze(self, chat_id: str) -> None:
+        self.upsert_chat(chat_id, followup_due_at=None, snooze_reason=None)
 
     def record_followup_sent(self, chat_id: str, stage: int = 1) -> None:
         self.upsert_chat(
