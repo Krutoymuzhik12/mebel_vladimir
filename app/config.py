@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8095
     push_hour_start: int = 9
-    push_hour_end: int = 18
+    push_hour_end: int = 19
     followup_silence_hours: float = 4.0
 
     wazzup_api_key: str = ""

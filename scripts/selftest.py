@@ -303,17 +303,27 @@ async def main(argv: list[str]) -> int:
             followup_stage=0,
         )
 
+    # Попросил время подумать — через 5 часов дёргать нельзя
     _silent_for(5, "objection")
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check(
+        "взявшего паузу через 5 часов не трогаем", len(wazzup.sent) == before
+    )
+
+    # Через сутки — можно, и текстом про сомнения, а не дежурным
+    _silent_for(25, "objection")
     before = len(wazzup.sent)
     await orch.followup_job.tick()
     sent_objection = wazzup.sent[before:]
     failures += not check(
-        "возражение дожато", len(sent_objection) == 1, f"отправлено {len(sent_objection)}"
+        "через сутки возражение дожато", len(sent_objection) == 1,
+        f"отправлено {len(sent_objection)}"
     )
     if sent_objection:
         failures += not check(
-            "текст про цену, а не дежурный",
-            "останавливает" in sent_objection[0][1],
+            "текст помнит про паузу, а не дежурный",
+            "не тороплю" in sent_objection[0][1],
             sent_objection[0][1][:60],
         )
     chat = db.get_chat("555000111")
@@ -321,6 +331,37 @@ async def main(argv: list[str]) -> int:
         "ступень выросла",
         bool(chat) and int(chat.get("followup_stage") or 0) == 1,
         str(chat.get("followup_stage") if chat else "нет чата"),
+    )
+
+    # Просто откололся: первая попытка через 4 часа, вторая через двое суток
+    _silent_for(5, "product_question")
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check(
+        "пропавшего молча дожимаем через 4 часа", len(wazzup.sent) == before + 1
+    )
+    db.upsert_chat("555000111", followup_stage=1)
+    _silent_for(30, "product_question")
+    db.upsert_chat("555000111", followup_stage=1)
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check(
+        "через 30 часов вторая попытка ещё рано", len(wazzup.sent) == before
+    )
+    _silent_for(50, "product_question")
+    db.upsert_chat("555000111", followup_stage=1)
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check(
+        "через двое суток вторая и последняя попытка",
+        len(wazzup.sent) == before + 1,
+    )
+    _silent_for(200, "product_question")
+    db.upsert_chat("555000111", followup_stage=2)
+    before = len(wazzup.sent)
+    await orch.followup_job.tick()
+    failures += not check(
+        "третьего дожима не бывает", len(wazzup.sent) == before
     )
 
     _silent_for(5, "refusal")
