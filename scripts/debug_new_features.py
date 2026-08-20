@@ -195,10 +195,10 @@ async def test_document_bypasses_dialog(settings: Settings, db_path: Path) -> No
 
 
 async def test_max_notify_scope(db_path: Path) -> None:
-    """MAX беспокоит владельца только расчётами и файлами.
+    """Что MAX вправе прислать владельцу.
 
-    Авито «показал номер» и алерты мониторинга по умолчанию выключены —
-    каждое лишнее уведомление обесценивает те, на которые надо реагировать.
+    Расчёты, файлы и Авито «показал номер» — да: по каждому владелец что-то
+    делает. Алерты мониторинга остаются в логе, чтобы не размывать поток.
     """
     from app.notify.max import MaxNotifier
     from app.services.health_watch import HealthWatch
@@ -221,20 +221,26 @@ async def test_max_notify_scope(db_path: Path) -> None:
 
     wazzup = SilentWazzup(local, db)
 
-    # Авито: событие приходит, но в MAX не уходит и в БД не оседает
+    # Авито: событие уходит владельцу, клиенту при этом не пишем
     notifier = CountingMax(local)
     job = AvitoShowPhoneJob(db, wazzup, notifier, local)
-    check("Авито-уведомления выключены по умолчанию", not job.enabled)
+    check("Авито-уведомления включены по умолчанию", job.enabled)
     avito = wazzup.parse_webhook(
         {"messages": [msg("a1", "system", chatType="avito", text="Клиент показал номер")]}
     )[0]
     await job.on_event(avito)
-    check("Авито show-phone не ушёл в MAX", notifier.sent == [], f"{notifier.sent}")
+    check("Авито show-phone ушёл в MAX", len(notifier.sent) == 1, f"{notifier.sent}")
     check(
-        "и не встал в очередь ретраев (иначе долбил бы вечно)",
+        "в тексте видно, что номер смотрели без звонка",
+        notifier.sent and "не позвонил" in notifier.sent[0],
+        notifier.sent[0][:60] if notifier.sent else "—",
+    )
+    check("клиенту при этом не написали", wazzup.sent == [], f"{wazzup.sent}")
+    check(
+        "доставлено → очередь ретраев пуста",
         db.candidates_show_phone() == [],
     )
-    check("tick() тоже молчит", await job.tick() == 0)
+    check("повторно не дублируется", await job.tick() == 0)
 
     # Мониторинг: проблема есть, но владельцу о ней не пишем
     watch_max = CountingMax(local)
@@ -259,6 +265,121 @@ async def test_max_notify_scope(db_path: Path) -> None:
     for n in (notifier, watch_max, price_max, doc_max):
         await n.aclose()
     await wazzup.aclose()
+
+
+class FakeMax:
+    """Ловим пуши в MAX вместо реальной отправки."""
+
+    def __init__(self, settings_obj: Settings, *, fail: bool = False) -> None:
+        self.settings = settings_obj
+        self.fail = fail
+        self.avito: list[tuple[str, str]] = []
+
+    async def avito_show_phone(self, *, chat_id: str, details: str = "") -> bool:
+        self.avito.append((chat_id, details))
+        return not self.fail
+
+    async def send(self, *a, **kw):
+        return ""
+
+    async def aclose(self) -> None:
+        return None
+
+
+def avito_event(mid: str = "a1") -> dict:
+    return msg(
+        mid,
+        "system",
+        chatType="avito",
+        text="Клиент показал номер телефона",
+    )
+
+
+async def test_avito_show_phone(settings: Settings, tmp: Path) -> None:
+    db = Database(tmp / "avito.db")
+    wazzup = SilentWazzup(settings, db)
+    orch = Orchestrator(settings, db, wazzup)
+    fake = FakeMax(settings)
+    orch.max_notifier = fake
+    orch.avito_job.max_notifier = fake
+
+    event = wazzup.parse_webhook({"messages": [avito_event()]})[0]
+    check("событие Авито распознано парсером", wazzup.looks_like_avito_show_phone(event))
+
+    await orch.ingest(event)
+
+    check("уведомление ушло в MAX", len(fake.avito) == 1, f"{fake.avito}")
+    check(
+        "в уведомлении верный чат",
+        fake.avito and fake.avito[0][0] == "chat-1",
+        f"{fake.avito[0][0] if fake.avito else '—'}",
+    )
+    check("клиенту НИЧЕГО не отправлено", wazzup.sent == [], f"{wazzup.sent}")
+    check("в историю диалога не попало", db.recent_messages("chat-1", 10) == [])
+    check("помечено как доставленное", db.candidates_show_phone() == [])
+
+    await wazzup.aclose()
+
+
+async def test_avito_retry(settings: Settings, tmp: Path) -> None:
+    """MAX недоступен → notified не ставим, дошлёт tick()."""
+    db = Database(tmp / "avito_retry.db")
+    wazzup = SilentWazzup(settings, db)
+    orch = Orchestrator(settings, db, wazzup)
+    broken = FakeMax(settings, fail=True)
+    orch.max_notifier = broken
+    orch.avito_job.max_notifier = broken
+
+    event = wazzup.parse_webhook({"messages": [avito_event("a2")]})[0]
+    await orch.ingest(event)
+    check(
+        "MAX упал → событие осталось в очереди",
+        len(db.candidates_show_phone()) == 1,
+        f"{len(db.candidates_show_phone())}",
+    )
+
+    working = FakeMax(settings)
+    orch.avito_job.max_notifier = working
+    sent = await orch.avito_job.tick()
+    check("tick дослал уведомление", sent == 1 and len(working.avito) == 1)
+    check("очередь опустела", db.candidates_show_phone() == [])
+    await wazzup.aclose()
+
+
+async def test_avito_flag_off(tmp: Path) -> None:
+    local = Settings(
+        wazzup_api_key="k",
+        wazzup_send_enabled=False,
+        test_mode=False,
+        poe_api_key="",
+        max_enabled=False,
+        vision_enabled=False,
+        backup_enabled=False,
+        health_watch_enabled=False,
+        max_notify_avito=False,
+    )
+    db = Database(tmp / "avito_off.db")
+    wazzup = SilentWazzup(local, db)
+    orch = Orchestrator(local, db, wazzup)
+    fake = FakeMax(local)
+    orch.avito_job.max_notifier = fake
+
+    event = wazzup.parse_webhook({"messages": [avito_event("a3")]})[0]
+    await orch.ingest(event)
+    check("MAX_NOTIFY_AVITO=0 → в MAX не пишем", fake.avito == [])
+    check(
+        "выключенный флаг не копит очередь",
+        db.candidates_show_phone() == [],
+        f"{len(db.candidates_show_phone())}",
+    )
+    await wazzup.aclose()
+
+
+def test_avito_defaults() -> None:
+    check(
+        "MAX_NOTIFY_AVITO включён по умолчанию",
+        Settings().max_notify_avito is True,
+    )
 
 
 async def test_send_retries(settings: Settings, db_path: Path) -> None:
@@ -456,10 +577,16 @@ def main() -> None:
         print("\n--- Игнор стикеров и видео в пайплайне ---")
         asyncio.run(test_ingest_ignores(settings, db_path))
 
+        print("\n--- Авито «показал номер» → MAX ---")
+        test_avito_defaults()
+        asyncio.run(test_avito_show_phone(settings, tmp))
+        asyncio.run(test_avito_retry(settings, tmp))
+        asyncio.run(test_avito_flag_off(tmp))
+
         print("\n--- Документ уходит в MAX, минуя модель ---")
         asyncio.run(test_document_bypasses_dialog(settings, tmp / "doc.db"))
 
-        print("\n--- MAX: только расчёты и файлы ---")
+        print("\n--- MAX: расчёты, файлы, Авито (без алертов мониторинга) ---")
         asyncio.run(test_max_notify_scope(tmp / "scope.db"))
 
         print("\n--- Ретраи отправки ---")
