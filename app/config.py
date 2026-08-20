@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     amocrm_base_url: str = ""
     amocrm_token: str = ""
     amocrm_baseline_file: str = "data/existing_baseline.txt"
+    # Чаты, которые НИКОГДА не помечаем «старыми», даже если они есть в CRM.
+    # Нужно для тестовых: наш телеграм уже завёл контакт в amoCRM, и после
+    # пересоздания базы бот замолчал бы в собственном тестовом чате.
+    baseline_exclude_chat_ids: str = ""
 
     # ---------- Тестовый режим ----------
     # 1 — слушаем только каналы из test_channel_ids / test_chat_types
@@ -141,6 +145,10 @@ class Settings(BaseSettings):
     @property
     def test_chat_type_set(self) -> set[str]:
         return self._csv_set(self.test_chat_types)
+
+    @property
+    def baseline_exclude_set(self) -> set[str]:
+        return self._csv_set(self.baseline_exclude_chat_ids)
 
     def public_media_url(self, rel_path: str) -> str:
         """Ссылка на файл каталога, которую примет Wazzup.

@@ -481,6 +481,56 @@ async def test_amocrm_baseline(tmp: Path) -> None:
     check("amoCRM: с заглушкой API не дёргается", ids2 == [], f"{ids2}")
 
 
+async def test_amocrm_extraction(tmp: Path) -> None:
+    """Разбор ответа amoCRM без сети.
+
+    Имена полей сверены с живым аккаунтом клиента: коннектор Wazzup кладёт
+    точный chatId в отдельное поле под каждый канал. Телефон приводим к виду,
+    в котором Wazzup отдаёт chatId для WhatsApp (79XXXXXXXXX).
+    """
+    for raw, want in (
+        ("89069235000", "79069235000"),
+        ("+7 906 923-50-00", "79069235000"),
+        ("9069235000", "79069235000"),
+        ("79069235000", "79069235000"),
+        ("не телефон", ""),
+        ("123", ""),
+    ):
+        check(f"телефон {raw!r} → {want!r}", amocrm.normalize_phone(raw) == want,
+              amocrm.normalize_phone(raw))
+
+    contact = {
+        "id": 1,
+        "custom_fields_values": [
+            {"field_name": "TelegramId_WZ", "values": [{"value": "7936875555"}]},
+            {"field_name": "Avito_WZ", "values": [{"value": "u2i-OVbsXpRMhK"}]},
+            {"field_name": "Телефон", "values": [{"value": "89069235000"}]},
+            {"field_name": "Должность", "values": [{"value": "директор"}]},
+        ],
+    }
+    keys = amocrm._keys_from_contact(contact)
+    check(
+        "берём id чатов и телефон, не берём посторонние поля",
+        set(keys) == {"7936875555", "u2i-OVbsXpRMhK", "79069235000"},
+        f"{keys}",
+    )
+
+    # Исключения: тестовый чат не должен уйти в «старые» даже из CRM
+    baseline = tmp / "excl.txt"
+    baseline.write_text("7936875555\n79069235000\n", encoding="utf-8")
+    local = Settings(
+        amocrm_token="",
+        amocrm_baseline_file=str(baseline),
+        baseline_exclude_chat_ids="7936875555",
+    )
+    ids = await amocrm.baseline_existing_ids(local)
+    check(
+        "исключённый чат не попал в baseline",
+        ids == ["79069235000"],
+        f"{ids}",
+    )
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -597,6 +647,9 @@ def main() -> None:
 
         print("\n--- amoCRM baseline (заглушка) ---")
         asyncio.run(test_amocrm_baseline(tmp))
+
+        print("\n--- amoCRM: разбор полей и исключения ---")
+        asyncio.run(test_amocrm_extraction(tmp))
 
         print("\n--- Gatekeeper existing ---")
         test_gatekeeper_baseline(tmp / "gate.db")

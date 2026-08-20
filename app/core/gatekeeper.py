@@ -91,7 +91,12 @@ class Gatekeeper:
         return current
 
     def baseline_many(self, chat_ids: list[str]) -> int:
+        """Пометить незнакомые чаты как «были до бота». Возвращает,
+        сколько реально помечено, а не сколько пришло на вход: уже
+        известные чаты не трогаем, чтобы не отобрать у бота свои же."""
+        marked = 0
         for cid in chat_ids:
             if self.status(cid) is None:
                 self.mark_existing(cid, reason="startup baseline")
-        return len(chat_ids)
+                marked += 1
+        return marked
