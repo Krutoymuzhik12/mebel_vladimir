@@ -682,6 +682,24 @@ async def test_max_reply_takes_over(tmp: Path) -> None:
         db.get_chat("chat-1")["status"],
     )
     check("перехват включён по умолчанию", Settings().max_reply_takes_over is True)
+
+    # Перехват обратим: #старт возвращает бота в чат
+    gate = Gatekeeper(db)
+    gate.on_staff_message("chat-1", "#старт")
+    check(
+        "после #старт бот снова ведёт чат",
+        db.get_chat("chat-1")["status"] == "new",
+        db.get_chat("chat-1")["status"],
+    )
+
+    # А вот старый клиент из CRM не оживает никогда — это другой случай
+    db.upsert_chat("old-1", status="existing")
+    gate.on_staff_message("old-1", "#старт")
+    check(
+        "старого клиента из CRM #старт не оживляет",
+        db.get_chat("old-1")["status"] == "existing",
+        db.get_chat("old-1")["status"],
+    )
     await w.aclose()
 
 
