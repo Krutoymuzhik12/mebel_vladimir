@@ -6,19 +6,20 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/var/opt/vladimir_mebel
+WorkingDirectory=/var/opt/vladimir
 Environment=PYTHONUNBUFFERED=1
 # 2 ядра на машине, больше потоков только съест память без выигрыша
 Environment=OMP_NUM_THREADS=2
 Environment=MKL_NUM_THREADS=2
 # Отдельное окружение: torch тяжёлый, в основной venv ему делать нечего.
 # Наружу не слушаем — ходит только основной сервис с этой же машины.
-ExecStart=/var/opt/vladimir_mebel/.venv-vision/bin/python -m uvicorn app.vision.api:app --host 127.0.0.1 --port 8090
+ExecStart=/var/opt/vladimir/.venv-vision/bin/python -m uvicorn app.vision.api:app --host 127.0.0.1 --port 8090
 # Модель грузится в память при первом запросе, старт не мгновенный
 TimeoutStartSec=300
-# Машина делится с десятком соседних проектов и уже свопит. Потолок нужен,
-# чтобы при утечке или всплеске ядро прибило именно vision, а не чужой
-# сервис: подбор по фото — не критичная функция, бот переживёт его падение.
+# Потолок памяти: при утечке или всплеске ядро прибьёт именно vision, а не
+# основной сервис. Подбор по фото — не критичная функция, бот переживёт его
+# падение и честно скажет клиенту, что подбор недоступен.
+# Поднимайте, если на машине памяти много: DINOv2 хочет около 900 МБ.
 MemoryHigh=1G
 MemoryMax=1500M
 OOMPolicy=continue

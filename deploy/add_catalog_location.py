@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_CONF = Path("/etc/nginx/sites-available/osnova")
-CATALOG_ROOT = "/var/opt/vladimir_mebel/catalog"
+CATALOG_ROOT = "/var/opt/vladimir/catalog"
 MARKER = "location ~ ^/catalog/"
 
 BLOCK = f"""
