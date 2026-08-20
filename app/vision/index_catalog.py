@@ -28,6 +28,7 @@ from app.vision.config import (
     QDRANT_COLLECTION,
     make_qdrant_client,
 )
+from app.catalog import photos
 from app.vision.embedder import embed
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,23 +38,12 @@ DOWNLOAD_TIMEOUT = 30.0
 
 
 def cached_photo(url: str) -> Path | None:
-    """Скачать фото один раз. Имя файла — от ссылки, чтобы не качать повторно."""
-    PHOTO_DIR.mkdir(parents=True, exist_ok=True)
-    name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20] + ".jpg"
-    path = PHOTO_DIR / name
-    if path.exists() and path.stat().st_size > 2000:
-        return path
-    try:
-        with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT,
-                          follow_redirects=True) as resp:
-            resp.raise_for_status()
-            with path.open("wb") as f:
-                for chunk in resp.iter_bytes():
-                    f.write(chunk)
-    except (httpx.HTTPError, OSError):
-        path.unlink(missing_ok=True)
-        return None
-    return path if path.stat().st_size > 2000 else None
+    """Файл с диска, при необходимости докачав.
+
+    Тот же кэш, что использует отдача фото клиенту (app/catalog/photos.py):
+    скачиваем каждую картинку один раз на оба применения.
+    """
+    return photos.fetch(url)
 
 
 def main() -> int:

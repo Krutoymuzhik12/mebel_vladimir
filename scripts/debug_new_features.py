@@ -1056,6 +1056,35 @@ def test_media_proxy() -> None:
     )
 
 
+def test_photo_cache() -> None:
+    """Фото каталога живут на диске, а не тянутся из VK при каждой отдаче."""
+    from app.catalog import photos as cat_photos
+
+    url = "https://sun9-1.userapi.com/x/y/abc.jpg?quality=95&u=sig&cs=1600x0"
+    other = "https://sun9-1.userapi.com/x/y/abc.jpg?quality=95&u=DRUGAYA&cs=1600x0"
+
+    p1 = cat_photos.local_path(url)
+    check("имя файла считается от адреса", p1.name.endswith(".jpg"), p1.name)
+    check(
+        "разные адреса — разные файлы",
+        cat_photos.local_path(other).name != p1.name,
+    )
+    check(
+        "один адрес всегда даёт то же имя",
+        cat_photos.local_path(url).name == p1.name,
+    )
+    check("несуществующий файл не считается скачанным", not cat_photos.is_cached(url))
+
+    # Заглушка меньше порога не должна сойти за фотографию: так битая
+    # закачка не выдаст себя за готовый файл и будет докачана позже
+    cat_photos.PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    p1.write_bytes(b"x" * 100)
+    check("обрезок не считается скачанным", not cat_photos.is_cached(url))
+    p1.write_bytes(b"x" * (cat_photos.MIN_BYTES + 10))
+    check("полноценный файл считается скачанным", cat_photos.is_cached(url))
+    p1.unlink(missing_ok=True)
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -1176,6 +1205,9 @@ def main() -> None:
 
         print("\n--- amoCRM baseline (заглушка) ---")
         asyncio.run(test_amocrm_baseline(tmp))
+
+        print("\n--- Фото каталога на диске ---")
+        test_photo_cache()
 
         print("\n--- Фото каталога: короткий адрес вместо ссылки VK ---")
         test_media_proxy()

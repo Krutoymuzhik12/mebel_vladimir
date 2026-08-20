@@ -23,6 +23,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
+from app.catalog import photos as catalog_photos
 from app.catalog import search as catalog_search
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,17 @@ async def catalog_photo(article: str, index: int) -> Response:
         raise HTTPException(status_code=404, detail="no such photo")
 
     url = str(photos[index])
+
+    # Скачанное лежит на диске — отдаём оттуда: быстрее и не зависит от того,
+    # жива ли подписанная ссылка VK. В VK ходим только если файла ещё нет.
+    cached = catalog_photos.local_path(url)
+    if catalog_photos.is_cached(url):
+        return Response(
+            content=cached.read_bytes(),
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=604800"},
+        )
+
     try:
         async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as c:
             resp = await c.get(url)
