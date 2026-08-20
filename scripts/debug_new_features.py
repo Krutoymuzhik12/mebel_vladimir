@@ -685,6 +685,43 @@ async def test_max_reply_takes_over(tmp: Path) -> None:
     await w.aclose()
 
 
+def test_baseline_keeps_live_dialog(db_path: Path) -> None:
+    """Импорт из CRM не должен отбирать у бота живой диалог.
+
+    Коннектор Wazzup заводит контакт в amoCRM на любое входящее — в том числе
+    от нового клиента, которого бот только что взял. При следующем рестарте
+    этот чат придёт в списке «старых»; если поверить списку вслепую, бот
+    замолчит посреди разговора.
+    """
+    db = Database(db_path)
+    gate = Gatekeeper(db)
+
+    # клиент, которого бот уже ведёт
+    db.upsert_chat("live-1", status="new")
+    db.add_message("live-1", role="user", text="здравствуйте")
+    db.add_message("live-1", role="assistant", text="Здравствуйте! Владимир.")
+
+    # клиент, где бот отвечал, но строка чата потерялась (частичный бэкап)
+    db.add_message("orphan-1", role="assistant", text="Здравствуйте! Владимир.")
+
+    # действительно старый: ни статуса, ни реплик бота
+    marked = gate.baseline_many(["live-1", "orphan-1", "really-old"])
+
+    check("живой диалог не тронут", gate.status("live-1") == "new",
+          gate.status("live-1") or "нет")
+    check(
+        "диалог без строки чата тоже уцелел (бот там говорил)",
+        gate.status("orphan-1") != "existing",
+        str(gate.status("orphan-1")),
+    )
+    check("настоящий старый помечен", gate.status("really-old") == "existing")
+    check("помечен ровно один", marked == 1, f"marked={marked}")
+    check(
+        "bot_has_spoken различает живой и пустой чат",
+        db.bot_has_spoken("live-1") and not db.bot_has_spoken("really-old"),
+    )
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -814,6 +851,9 @@ def main() -> None:
 
         print("\n--- amoCRM: разбор полей и исключения ---")
         asyncio.run(test_amocrm_extraction(tmp))
+
+        print("\n--- Импорт из CRM не отбирает живой диалог ---")
+        test_baseline_keeps_live_dialog(tmp / "live.db")
 
         print("\n--- Gatekeeper existing ---")
         test_gatekeeper_baseline(tmp / "gate.db")

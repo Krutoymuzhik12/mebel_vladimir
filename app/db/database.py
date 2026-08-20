@@ -702,3 +702,22 @@ class Database:
                 "SELECT COUNT(*) AS n FROM chats WHERE status=?", (status,)
             ).fetchone()
         return int(row["n"] if row else 0)
+
+    def bot_has_spoken(self, chat_id: str) -> bool:
+        """Бот уже отвечал в этом чате?
+
+        Второй, независимый от статуса признак «диалог наш». Нужен на случай,
+        когда строка chats потерялась (частичное восстановление базы), а
+        переписка осталась: без него импорт из CRM пометил бы живой диалог
+        старым и бот замолчал бы посреди разговора.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM messages
+                WHERE chat_id=? AND role='assistant'
+                LIMIT 1
+                """,
+                (chat_id,),
+            ).fetchone()
+        return row is not None

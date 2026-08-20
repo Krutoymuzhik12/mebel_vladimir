@@ -142,12 +142,31 @@ class Gatekeeper:
         return current
 
     def baseline_many(self, chat_ids: list[str]) -> int:
-        """Пометить незнакомые чаты как «были до бота». Возвращает,
-        сколько реально помечено, а не сколько пришло на вход: уже
-        известные чаты не трогаем, чтобы не отобрать у бота свои же."""
+        """Пометить незнакомые чаты как «были до бота».
+
+        Главная тонкость: коннектор Wazzup заводит контакт в amoCRM на любое
+        входящее — в том числе от нового клиента, с которым бот прямо сейчас
+        разговаривает. При следующем импорте такой чат придёт в списке
+        «старых», и без защиты бот замолчал бы посреди живого диалога.
+
+        Поэтому чат не трогаем, если верен любой из двух независимых
+        признаков «диалог наш»:
+          1. чат уже есть в базе с любым статусом;
+          2. бот в нём уже отвечал — даже если строка chats потерялась.
+
+        Возвращает, сколько реально помечено, а не сколько пришло на вход.
+        """
         marked = 0
+        kept = 0
         for cid in chat_ids:
-            if self.status(cid) is None:
-                self.mark_existing(cid, reason="startup baseline")
-                marked += 1
+            if self.status(cid) is not None:
+                continue
+            if self.db.bot_has_spoken(cid):
+                kept += 1
+                logger.info("chat=%s в списке CRM, но диалог наш — не трогаю", cid)
+                continue
+            self.mark_existing(cid, reason="startup baseline")
+            marked += 1
+        if kept:
+            logger.info("baseline: %s живых диалогов бота сохранено", kept)
         return marked
