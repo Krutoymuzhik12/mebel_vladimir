@@ -52,6 +52,8 @@ class Orchestrator:
         self.health = HealthWatch(settings, self.max_notifier)
         self.batcher = MessageBatcher(settings, self._on_batch)
         self._bg_tasks: list[asyncio.Task] = []
+        # Загружен ли список старых чатов. Пока нет — незнакомым не пишем.
+        self.baseline_ready = False
 
     async def startup(self) -> None:
         # Baseline existing: файл + (позже) amoCRM API
@@ -64,9 +66,28 @@ class Orchestrator:
         chat_ids = list(dict.fromkeys([*crm_ids, *wazzup_ids]))
         if chat_ids:
             n = self.gate.baseline_many(chat_ids)
-            logger.info("baseline existing chats: %s", n)
+            logger.info("baseline existing chats: помечено %s из %s", n, len(chat_ids))
         else:
-            logger.info("baseline existing: пусто (файл/API пока без ключей)")
+            logger.info("baseline existing: пусто (файл/API без ключей)")
+
+        # База считается загруженной, если история пришла сейчас ИЛИ уже лежит
+        # с прошлого успешного импорта — иначе перезапуск при недоступной CRM
+        # снял бы защиту, хотя все старые чаты в базе на месте.
+        minimum = max(1, int(self.settings.baseline_min_chats))
+        known_old = self.db.count_chats_by_status("existing")
+        self.baseline_ready = len(chat_ids) >= minimum or known_old >= minimum
+        if self.baseline_ready:
+            logger.info(
+                "история известна (%s старых чатов) — незнакомый чат считаем новым",
+                known_old,
+            )
+        else:
+            logger.warning(
+                "история НЕ загружена (%s старых чатов при пороге %s): незнакомым "
+                "чатам бот отвечать не будет. Проверьте AMOCRM_TOKEN.",
+                known_old,
+                minimum,
+            )
 
         self._bg_tasks.append(asyncio.create_task(self._followup_loop()))
         self._bg_tasks.append(asyncio.create_task(self._avito_retry_loop()))
@@ -158,6 +179,7 @@ class Orchestrator:
                 channel_id=msg.channel_id,
                 fresh_channels=self.settings.fresh_channel_id_set,
                 policy=self.settings.first_contact_policy,
+                baseline_ready=self.baseline_ready,
             )
 
         # Запоминаем, куда отвечать: без channelId+chatType Wazzup ответ не примет

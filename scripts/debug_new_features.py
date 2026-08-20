@@ -596,8 +596,54 @@ async def test_first_contact_policy(tmp: Path) -> None:
     )
     await w3.aclose()
 
-    check("политика safe включена по умолчанию",
-          Settings().first_contact_policy == "safe")
+    check("политика auto включена по умолчанию",
+          Settings().first_contact_policy == "auto")
+
+    # auto: пока история не загружена — молчим
+    auto = Settings(**common, first_contact_policy="auto", baseline_min_chats=5)
+    db4 = Database(tmp / "fc_auto_cold.db")
+    w4 = SilentWazzup(auto, db4)
+    orch4 = Orchestrator(auto, db4, w4)
+    orch4.baseline_ready = False
+    for m in w4.parse_webhook({"messages": [msg("p4", "text", text="привет")]}):
+        await orch4.ingest(m)
+    row4 = db4.get_chat("chat-1")
+    check(
+        "auto без загруженной истории: молчим",
+        row4 and row4["status"] == "existing",
+        str(row4.get("status") if row4 else "нет чата"),
+    )
+    check("auto без истории: клиенту не ответили", w4.sent == [])
+    await w4.aclose()
+
+    # auto: история загружена → «нет в базе» значит «новый», отвечаем
+    db5 = Database(tmp / "fc_auto_warm.db")
+    w5 = SilentWazzup(auto, db5)
+    orch5 = Orchestrator(auto, db5, w5)
+    orch5.baseline_ready = True
+    for m in w5.parse_webhook({"messages": [msg("p5", "text", text="привет")]}):
+        await orch5.ingest(m)
+    row5 = db5.get_chat("chat-1")
+    check(
+        "auto с загруженной историей: чат достаётся боту",
+        row5 and row5["status"] == "new",
+        str(row5.get("status") if row5 else "нет чата"),
+    )
+    await w5.aclose()
+
+    # baseline_ready поднимается по факту загрузки, а не по флагу в .env
+    baseline_db = Database(tmp / "fc_ready.db")
+    for i in range(6):
+        baseline_db.upsert_chat(f"old-{i}", status="existing")
+    w6 = SilentWazzup(auto, baseline_db)
+    orch6 = Orchestrator(auto, baseline_db, w6)
+    await orch6.startup()
+    check(
+        "старые чаты в базе с прошлого импорта → истории верим",
+        orch6.baseline_ready,
+        f"старых={baseline_db.count_chats_by_status('existing')}",
+    )
+    await orch6.shutdown()
 
 
 async def test_max_reply_takes_over(tmp: Path) -> None:

@@ -689,3 +689,16 @@ class Database:
                 """,
                 (status, _utc_now(), request_id),
             )
+
+    def count_chats_by_status(self, status: str) -> int:
+        """Сколько чатов в этом статусе.
+
+        Нужно, чтобы понять, загружен ли baseline: если в базе уже лежат
+        тысячи «старых» чатов с прошлого успешного импорта, значит истории
+        мы знаем и незнакомому чату можно доверять как новому.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM chats WHERE status=?", (status,)
+            ).fetchone()
+        return int(row["n"] if row else 0)

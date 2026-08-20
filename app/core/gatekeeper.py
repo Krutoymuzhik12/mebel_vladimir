@@ -51,6 +51,7 @@ class Gatekeeper:
         channel_id: str = "",
         fresh_channels: set[str] | None = None,
         policy: str = "safe",
+        baseline_ready: bool = False,
     ) -> ChatStatus:
         """Незнакомый чат: новый клиент или старый, о котором мы не знаем?
 
@@ -66,6 +67,11 @@ class Gatekeeper:
 
         Исключение — каналы из fresh_channels: там истории до бота нет по
         определению, молчать не от кого.
+
+        baseline_ready говорит, загружен ли список старых чатов из amoCRM.
+        Если да — «нет в базе» означает «новый клиент», и боту можно
+        отвечать. Если импорт упал, а мы всё равно ответим всем незнакомым,
+        то поздороваемся со всей клиентской базой разом.
         """
         current = self.status(chat_id)
         if current:
@@ -75,11 +81,18 @@ class Gatekeeper:
             self.claim_new(chat_id)
             return BOT_OWNED
 
-        if (policy or "safe").strip().lower() == "open":
+        mode = (policy or "auto").strip().lower()
+        if mode == "auto":
+            # База знает историю — значит «нет в базе» честно означает «новый»
+            mode = "open" if baseline_ready else "safe"
+
+        if mode == "open":
             self.claim_new(chat_id)
             return BOT_OWNED
 
-        self.mark_existing(chat_id, reason="незнакомый чат, политика safe")
+        self.mark_existing(
+            chat_id, reason="незнакомый чат, база истории не подтверждена"
+        )
         return NOT_OURS
 
     def classify_first_seen(
