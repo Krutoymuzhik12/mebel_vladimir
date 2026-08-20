@@ -11,7 +11,7 @@ import random
 import secrets
 from typing import Any
 
-from app.config import Settings
+from app.config import ROOT, Settings
 from app.core.batcher import MessageBatcher
 from app.core.dialog import DialogService
 from app.core.gatekeeper import BOT_OWNED, START_CMD, STOP_CMD, Gatekeeper
@@ -22,6 +22,8 @@ from app.jobs.followups import FollowUpJob
 from app.jobs.max_inbox import MaxInbox
 from app.jobs.price_relay import PriceRelay
 from app.notify.max import MaxNotifier
+from app.services import amocrm, backup
+from app.services.health_watch import HealthWatch
 from app.transports.base import IncomingMessage
 from app.transports.wazzup import WazzupTransport
 
@@ -43,17 +45,32 @@ class Orchestrator:
             settings, db, wazzup, self.quiet, self.max_notifier
         )
         self.max_inbox = MaxInbox(settings, db, self.max_notifier, self.price_relay)
+        self.health = HealthWatch(settings, self.max_notifier)
         self.batcher = MessageBatcher(settings, self._on_batch)
         self._bg_tasks: list[asyncio.Task] = []
 
     async def startup(self) -> None:
-        chat_ids = await self.wazzup.baseline_existing_chats()
+        # Baseline existing: файл + (позже) amoCRM API
+        try:
+            crm_ids = await amocrm.baseline_existing_ids(self.settings)
+        except Exception:
+            logger.exception("amocrm baseline failed")
+            crm_ids = []
+        wazzup_ids = await self.wazzup.baseline_existing_chats()
+        chat_ids = list(dict.fromkeys([*crm_ids, *wazzup_ids]))
         if chat_ids:
             n = self.gate.baseline_many(chat_ids)
             logger.info("baseline existing chats: %s", n)
+        else:
+            logger.info("baseline existing: пусто (файл/API пока без ключей)")
+
         self._bg_tasks.append(asyncio.create_task(self._followup_loop()))
         self._bg_tasks.append(asyncio.create_task(self._avito_retry_loop()))
         self._bg_tasks.append(asyncio.create_task(self.max_inbox.run_forever()))
+        if self.settings.backup_enabled:
+            self._bg_tasks.append(asyncio.create_task(self._backup_loop()))
+        if self.settings.health_watch_enabled:
+            self._bg_tasks.append(asyncio.create_task(self._health_loop()))
 
     async def shutdown(self) -> None:
         for t in self._bg_tasks:
@@ -131,6 +148,11 @@ class Orchestrator:
         # Исходящее не через наш API — менеджер написал руками / #стоп / #старт
         if msg.is_echo:
             await self._on_staff_echo(msg)
+            return
+
+        # Стикеры и видео: не отвечаем и в диалог не кладём
+        if msg.kind in {"sticker", "video"}:
+            logger.info("skip chat=%s kind=%s — не реагируем", msg.chat_id, msg.kind)
             return
 
         # Авито show-phone — в MAX, клиенту не отвечаем
@@ -366,3 +388,29 @@ class Orchestrator:
             except Exception:
                 logger.exception("avito retry tick failed")
             await asyncio.sleep(120 if self.settings.fast_mode else 600)
+
+    async def _backup_loop(self) -> None:
+        # Первый бэкап почти сразу после старта, дальше — по интервалу
+        await asyncio.sleep(30 if self.settings.fast_mode else 60)
+        while True:
+            try:
+                dest_dir = ROOT / self.settings.backup_dir
+                backup.backup_db(
+                    self.settings.db_file,
+                    dest_dir,
+                    keep=max(1, int(self.settings.backup_keep)),
+                )
+            except Exception:
+                logger.exception("backup failed")
+            hours = max(0.1, float(self.settings.backup_interval_hours))
+            await asyncio.sleep(60 if self.settings.fast_mode else hours * 3600)
+
+    async def _health_loop(self) -> None:
+        await asyncio.sleep(20)
+        while True:
+            try:
+                await self.health.check()
+            except Exception:
+                logger.exception("health watch failed")
+            wait = max(30.0, float(self.settings.health_watch_interval_sec))
+            await asyncio.sleep(60 if self.settings.fast_mode else wait)

@@ -12,7 +12,7 @@ from app.catalog import vocab
 from app.config import settings
 from app.core.markers import Markers, extract
 from app.db.database import Database
-from app.services import media, transcription
+from app.services import attachments, media, transcription
 from app.services.poe import PoeClient
 from app.transports.base import IncomingMessage
 from app.vision.client import VisionClient
@@ -73,6 +73,39 @@ class DialogService:
         self.vision = VisionClient()
         self.catalog = catalog_search.shared()
 
+    async def _read_attachments(
+        self, messages: list[IncomingMessage]
+    ) -> tuple[str, list[str]]:
+        """Документ / geo → подсказки + текст из PDF/DOCX.
+
+        Стикеры и видео сюда не доходят — orchestrator их отбрасывает.
+        """
+        texts: list[str] = []
+        hints: list[str] = []
+        for m in messages:
+            if m.kind not in {"document", "geo", "unsupported"}:
+                continue
+            hint = attachments.hint_for(m.kind)
+            if hint:
+                hints.append(hint)
+            if m.kind == "document" and m.media_url:
+                extracted = await attachments.extract_from_url(m.media_url)
+                if extracted:
+                    logger.info(
+                        "документ разобран chat=%s chars=%s", m.chat_id, len(extracted)
+                    )
+                    texts.append(f"(текст из документа клиента)\n{extracted}")
+                    if self.db is not None and m.message_id:
+                        self.db.set_message_text(
+                            m.message_id, extracted[:2000]
+                        )
+                else:
+                    hints.append(
+                        "Из документа текст не извлечён (скан/неподдерживаемый "
+                        "формат). Не выдумывай содержимое файла."
+                    )
+        return "\n".join(texts).strip(), hints
+
     async def _read_voice(
         self, messages: list[IncomingMessage]
     ) -> tuple[str, list[str]]:
@@ -86,16 +119,31 @@ class DialogService:
         for m in messages:
             if m.kind != "voice" or not m.media_url:
                 continue
-            raw = await media.download(m.media_url)
+            raw = await media.download(
+                m.media_url, max_bytes=settings.voice_max_bytes
+            )
             if raw is None:
                 hints.append(
-                    "Клиент прислал голосовое, но файл не скачался. Извинись и "
-                    "попроси написать текстом или продиктовать ещё раз."
+                    "Клиент прислал голосовое, но файл не скачался или слишком "
+                    "длинный. Извинись и попроси написать текстом или короткое "
+                    "голосовое до полутора минут."
+                )
+                continue
+            if len(raw) > settings.voice_max_bytes:
+                hints.append(
+                    "Голосовое слишком длинное. Попроси коротко текстом или "
+                    "голосовое до полутора минут."
                 )
                 continue
             text = await transcription.transcribe_bytes(
                 raw, suffix=media.suffix_for(m.media_url, "voice")
             )
+            if text.startswith("[голосовое слишком длинное]"):
+                hints.append(
+                    "Голосовое слишком длинное. Попроси коротко текстом или "
+                    "голосовое до полутора минут."
+                )
+                continue
             if transcription.unclear(text):
                 logger.info("голосовое не разобрано chat=%s: %r", m.chat_id, text[:80])
                 hints.append(
@@ -311,18 +359,29 @@ class DialogService:
         if voice_text:
             user_text = f"{user_text}\n{voice_text}".strip()
 
+        att_text, att_hints = await self._read_attachments(messages)
+        hints += att_hints
+        if att_text:
+            user_text = f"{user_text}\n{att_text}".strip()
+
         photo_hints, matches = await self._read_photos(
             messages, furniture=f"{known.get('furniture') or ''} {user_text}"
         )
         hints += photo_hints
 
-        # Фото/голос без подписи: не отдаём в модель пустую строку
+        # Медиа без подписи: не отдаём в модель пустую строку
         if not user_text:
             kinds = {m.kind for m in messages}
             if "image" in kinds:
                 user_text = "(клиент прислал фото)"
             elif "voice" in kinds:
                 user_text = "(клиент прислал голосовое)"
+            elif "document" in kinds:
+                user_text = "(клиент прислал документ)"
+            elif "geo" in kinds:
+                user_text = "(клиент прислал геолокацию)"
+            elif "unsupported" in kinds:
+                user_text = "(клиент прислал вложение)"
         history_rows = (
             self.db.recent_messages(chat_id, self.history_limit) if self.db else []
         )

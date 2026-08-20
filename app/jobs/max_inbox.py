@@ -23,10 +23,11 @@ import asyncio
 import logging
 from typing import Any
 
-from app.config import Settings
+from app.config import ROOT, Settings
 from app.db.database import Database
 from app.jobs.price_relay import PriceRelay
 from app.notify.max import ANSWER_PREFIX, SKIP_PREFIX, MaxNotifier
+from app.services.process_lock import ExclusiveLock
 
 logger = logging.getLogger(__name__)
 
@@ -81,15 +82,29 @@ class MaxInbox:
         if not self.max.ready:
             logger.info("MAX inbox не запущен: нет токена или чата")
             return
-        logger.info("MAX inbox: слушаю чат %s", self.max.chat_id)
-        while True:
-            try:
-                await self.poll_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("MAX inbox: цикл упал, пробуем снова")
-                await asyncio.sleep(ERROR_BACKOFF)
+
+        lock_path = ROOT / self.settings.max_inbox_lock_path
+        lock = ExclusiveLock(lock_path)
+        if not lock.acquire():
+            logger.error(
+                "MAX inbox: лок %s занят — второй процесс не слушаю "
+                "(иначе события кнопок разъедутся)",
+                lock_path,
+            )
+            return
+
+        logger.info("MAX inbox: слушаю чат %s (лок %s)", self.max.chat_id, lock_path)
+        try:
+            while True:
+                try:
+                    await self.poll_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("MAX inbox: цикл упал, пробуем снова")
+                    await asyncio.sleep(ERROR_BACKOFF)
+        finally:
+            lock.release()
 
     async def poll_once(self) -> None:
         data = await self.max.get_updates(self._marker, timeout=POLL_TIMEOUT)

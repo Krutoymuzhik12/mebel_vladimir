@@ -12,6 +12,7 @@ amoCRM в коде не участвует.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -22,9 +23,14 @@ from app.transports.base import IncomingMessage, SendResult
 
 logger = logging.getLogger(__name__)
 
-# Типы сообщений Wazzup, которые для нас — картинка
+# Типы сообщений Wazzup → наш kind
 IMAGE_TYPES = {"image", "photo"}
 VOICE_TYPES = {"audio", "voice", "ptt"}
+VIDEO_TYPES = {"video", "video_note", "animation", "gif"}
+DOCUMENT_TYPES = {"document", "file", "doc", "pdf"}
+STICKER_TYPES = {"sticker"}
+GEO_TYPES = {"geo", "location", "location_message"}
+PLATFORM_SYSTEM_TYPES = {"system", "service", "event"}
 
 
 class WazzupTransport:
@@ -126,12 +132,24 @@ class WazzupTransport:
             kind = "image"
         elif msg_type in VOICE_TYPES:
             kind = "voice"
+        elif msg_type in VIDEO_TYPES:
+            kind = "video"
+        elif msg_type in DOCUMENT_TYPES:
+            kind = "document"
+        elif msg_type in STICKER_TYPES:
+            kind = "sticker"
+        elif msg_type in GEO_TYPES:
+            kind = "geo"
         elif msg_type == "text":
             kind = "text"
-        else:
+        elif msg_type in PLATFORM_SYSTEM_TYPES:
             kind = "system"
+        else:
+            # Неизвестный тип с файлом → document; иначе unsupported (не пустой system)
+            kind = "document" if item.get("contentUri") else "unsupported"
 
         chat_type = str(item.get("chatType") or "").lower()
+        is_platform_system = kind == "system"
         return IncomingMessage(
             chat_id=chat_id,
             message_id=str(item.get("messageId") or ""),
@@ -142,7 +160,7 @@ class WazzupTransport:
             is_echo=is_echo,
             author_name=str(item.get("authorName") or ""),
             contact_name=contact_name,
-            is_system=kind == "system",
+            is_system=is_platform_system,
             raw=item,
             media_url=item.get("contentUri") or None,
         )
@@ -268,28 +286,58 @@ class WazzupTransport:
         if not content_uri and not text:
             return SendResult(ok=False, error="empty message")
 
-        try:
-            client = await self.client()
-            resp = await client.post(
-                f"{self.base}/v3/message", json=body, headers=self._headers()
-            )
-        except httpx.HTTPError as exc:
-            logger.exception("wazzup send network error chat=%s", chat_id)
-            return SendResult(ok=False, error=f"network: {exc}")
+        attempts = max(1, int(self.settings.wazzup_send_retries))
+        backoff = max(0.2, float(self.settings.wazzup_send_retry_backoff_sec))
+        last_error = "unknown"
 
-        if resp.status_code in (200, 201):
-            data = self._json(resp)
-            external_id = str(data.get("messageId") or "") if data else ""
-            logger.info(
-                "wazzup sent chat=%s type=%s message_id=%s", chat_id, chat_type, external_id
-            )
-            return SendResult(ok=True, external_id=external_id)
+        for attempt in range(1, attempts + 1):
+            try:
+                client = await self.client()
+                resp = await client.post(
+                    f"{self.base}/v3/message", json=body, headers=self._headers()
+                )
+            except httpx.HTTPError as exc:
+                last_error = f"network: {exc}"
+                logger.warning(
+                    "wazzup send network error chat=%s attempt=%s/%s: %s",
+                    chat_id,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(backoff * attempt)
+                    continue
+                logger.exception("wazzup send network error chat=%s", chat_id)
+                return SendResult(ok=False, error=last_error)
 
-        error = self._describe_error(resp)
-        logger.error(
-            "wazzup send failed chat=%s http=%s %s", chat_id, resp.status_code, error
-        )
-        return SendResult(ok=False, error=error)
+            if resp.status_code in (200, 201):
+                data = self._json(resp)
+                external_id = str(data.get("messageId") or "") if data else ""
+                logger.info(
+                    "wazzup sent chat=%s type=%s message_id=%s",
+                    chat_id,
+                    chat_type,
+                    external_id,
+                )
+                return SendResult(ok=True, external_id=external_id)
+
+            last_error = self._describe_error(resp)
+            # 429 / 5xx — имеет смысл повторить; 4xx (кроме 429) — нет
+            retryable = resp.status_code == 429 or resp.status_code >= 500
+            logger.error(
+                "wazzup send failed chat=%s http=%s attempt=%s/%s %s",
+                chat_id,
+                resp.status_code,
+                attempt,
+                attempts,
+                last_error,
+            )
+            if not retryable or attempt >= attempts:
+                return SendResult(ok=False, error=last_error)
+            await asyncio.sleep(backoff * attempt)
+
+        return SendResult(ok=False, error=last_error)
 
     @staticmethod
     def _json(resp: httpx.Response) -> dict[str, Any] | None:

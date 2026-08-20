@@ -179,10 +179,48 @@ async def transcribe(audio_path: Path) -> str:
 async def transcribe_bytes(data: bytes, suffix: str = ".ogg") -> str:
     if not data:
         return "[пустой аудиофайл]"
+    if len(data) > settings.voice_max_bytes:
+        return "[голосовое слишком длинное]"
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / f"voice{suffix}"
         path.write_bytes(data)
+        duration = await asyncio.to_thread(_probe_duration_sec, path)
+        if duration is not None and duration > settings.voice_max_seconds:
+            logger.info(
+                "голосовое %.1f сек > лимита %.0f — отказ",
+                duration,
+                settings.voice_max_seconds,
+            )
+            return "[голосовое слишком длинное]"
         return await transcribe(path)
+
+
+def _probe_duration_sec(path: Path) -> float | None:
+    """Длительность через ffprobe, если есть. Иначе None — режем только по байтам."""
+    if shutil.which("ffprobe") is None:
+        return None
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if out.returncode != 0:
+            return None
+        return float((out.stdout or "").strip())
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
 
 
 def failed(text: str) -> bool:

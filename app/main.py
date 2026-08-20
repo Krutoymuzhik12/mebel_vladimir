@@ -66,16 +66,21 @@ app = FastAPI(title="Vladimir mebel osnova", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    from app.services import amocrm as amocrm_svc
+
     return {
         "ok": True,
         "wazzup_configured": bool(settings.wazzup_api_key),
         "poe_configured": bool(settings.poe_api_key),
+        "amocrm": amocrm_svc.probe_config(settings),
         "test_mode": settings.test_mode,
         "test_channel_ids": sorted(settings.test_channel_id_set),
         "test_chat_types": sorted(settings.test_chat_type_set),
         "send_enabled": settings.wazzup_send_enabled,
         "max_enabled": settings.max_enabled,
         "history_limit": settings.history_limit,
+        "backup_enabled": settings.backup_enabled,
+        "health_watch_enabled": settings.health_watch_enabled,
     }
 
 

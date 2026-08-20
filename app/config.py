@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     wazzup_api_base: str = "https://api.wazzup24.com"
     # Публичный URL сервиса — нужен, чтобы зарегистрировать webhook в Wazzup
     public_webhook_url: str = ""
+    # Ретраи отправки в Wazzup (сеть / 429 / 5xx)
+    wazzup_send_retries: int = 3
+    wazzup_send_retry_backoff_sec: float = 1.5
+
+    # ---------- amoCRM (baseline existing) ----------
+    # Пока токена нет — только файл data/existing_baseline.txt
+    amocrm_base_url: str = ""
+    amocrm_token: str = ""
+    amocrm_baseline_file: str = "data/existing_baseline.txt"
 
     # ---------- Тестовый режим ----------
     # 1 — слушаем только каналы из test_channel_ids / test_chat_types
@@ -85,6 +94,18 @@ class Settings(BaseSettings):
     poe_whisper_bot: str = "Gemini-2.5-Flash"
     # Больше 25 МБ голосовых не бывает, а качать чужие ссылки без предела нельзя
     media_max_bytes: int = 26_214_400
+    # Потолок на расшифровку: длинное голосовое → отказ, просим текстом
+    voice_max_seconds: float = 90.0
+    voice_max_bytes: int = 3_000_000
+
+    # Бэкап SQLite и монитор
+    backup_enabled: bool = True
+    backup_dir: str = "data/backups"
+    backup_keep: int = 14
+    backup_interval_hours: float = 24.0
+    health_watch_enabled: bool = True
+    health_watch_interval_sec: float = 600.0
+    max_inbox_lock_path: str = "data/max_inbox.lock"
 
     # Показывать клиенту фото найденных позиций каталога
     send_catalog_photos: bool = True

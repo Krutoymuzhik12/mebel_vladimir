@@ -13,7 +13,7 @@ class IncomingMessage:
     chat_id: str
     message_id: str
     text: str = ""
-    # image | voice | system | text
+    # image | voice | text | video | document | sticker | geo | system
     kind: str = "text"
     channel: str = ""  # whatsapp, avito, telegram, ...
     # UUID канала Wazzup — обязателен, чтобы отправить ответ обратно
