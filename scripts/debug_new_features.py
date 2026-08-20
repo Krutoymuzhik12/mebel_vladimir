@@ -103,35 +103,14 @@ def test_attachment_hints() -> None:
         attachments.hint_for("sticker") == "",
     )
     check("видео без подсказки (фича убрана)", attachments.hint_for("video") == "")
-    check("документ: подсказка есть", bool(attachments.hint_for("document")))
+    # PDF/DOCX больше не разбираем: документ целиком уходит владельцу через
+    # MAX (DocumentRelay), модель его не видит — подсказки для неё нет.
+    check(
+        "документ: подсказки модели больше нет (уходит в MAX)",
+        attachments.hint_for("document") == "",
+    )
     check("geo: подсказка есть", bool(attachments.hint_for("geo")))
     check("unsupported: подсказка есть", bool(attachments.hint_for("unsupported")))
-
-    try:
-        import pypdf  # noqa: F401
-
-        has_pypdf = True
-    except ImportError:
-        has_pypdf = False
-    check("pypdf установлен", has_pypdf, "pip install pypdf" if not has_pypdf else "")
-
-    if has_pypdf:
-        from pypdf import PdfWriter
-
-        buf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        writer = PdfWriter()
-        writer.add_blank_page(width=200, height=200)
-        writer.write(buf)
-        buf.close()
-        data = Path(buf.name).read_bytes()
-        text = attachments.extract_bytes(data, filename="x.pdf")
-        Path(buf.name).unlink(missing_ok=True)
-        check("PDF без текстового слоя → пусто (не падаем)", text == "", repr(text[:40]))
-
-    check(
-        "неизвестный формат → пусто",
-        attachments.extract_bytes(b"\x00\x01", filename="x.zip") == "",
-    )
 
 
 class SilentWazzup(WazzupTransport):
@@ -169,6 +148,45 @@ async def test_ingest_ignores(settings: Settings, db_path: Path) -> None:
         f"{[h.get('kind') for h in history]}",
     )
     check("стикер/видео не вызвали отправку", wazzup.sent == [])
+    await orch.wazzup.aclose()
+    await orch.max_notifier.aclose()
+
+
+async def test_document_bypasses_dialog(settings: Settings, db_path: Path) -> None:
+    """Документ (PDF/Word/др.) уходит в MAX напрямую из orchestrator.ingest(),
+    минуя dialog.handle() и Poe. В этом тесте MAX выключен и POE_API_KEY пуст —
+    если бы документ всё же дошёл до модели, клиент получил бы FALLBACK-текст
+    диалога. Он не должен его получить ни при каком раскладе."""
+    from app.core.dialog import FALLBACK
+
+    db = Database(db_path)
+    wazzup = SilentWazzup(settings, db)
+    orch = Orchestrator(settings, db, wazzup)
+
+    payload = {
+        "messages": [
+            msg("d1", "document", contentUri="http://x/plan.pdf", text="вот план")
+        ]
+    }
+    for m in wazzup.parse_webhook(payload):
+        await orch.ingest(m)
+
+    history = db.recent_messages("chat-1", 10)
+    kinds = [h.get("kind") for h in history]
+    check("документ записан в историю", "document" in kinds, f"{kinds}")
+
+    reply = wazzup.sent[-1] if wazzup.sent else ""
+    check("клиенту что-то ответили", bool(reply))
+    check(
+        "это не ответ модели (FALLBACK), а текст DocumentRelay",
+        bool(reply) and reply != FALLBACK,
+        reply,
+    )
+    check(
+        "текст объясняет судьбу файла (MAX выключен → «не могу передать»)",
+        "специалист" in reply.lower(),
+        reply,
+    )
     await orch.wazzup.aclose()
     await orch.max_notifier.aclose()
 
@@ -367,6 +385,9 @@ def main() -> None:
 
         print("\n--- Игнор стикеров и видео в пайплайне ---")
         asyncio.run(test_ingest_ignores(settings, db_path))
+
+        print("\n--- Документ уходит в MAX, минуя модель ---")
+        asyncio.run(test_document_bypasses_dialog(settings, tmp / "doc.db"))
 
         print("\n--- Ретраи отправки ---")
         asyncio.run(test_send_retries(settings, tmp / "retry.db"))

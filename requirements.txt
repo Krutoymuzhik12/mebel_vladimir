@@ -6,8 +6,6 @@ python-dotenv>=1.0.0
 openpyxl>=3.1.0
 pillow>=10.0.0
 tzdata>=2024.1
-# PDF → текст для модели (бесплатно). DOCX опционально: pip install python-docx
-pypdf>=5.0.0
 # Vision (отдельный venv, как demo_for_mebel):
 # torch
 # qdrant-client

@@ -73,38 +73,21 @@ class DialogService:
         self.vision = VisionClient()
         self.catalog = catalog_search.shared()
 
-    async def _read_attachments(
-        self, messages: list[IncomingMessage]
-    ) -> tuple[str, list[str]]:
-        """Документ / geo → подсказки + текст из PDF/DOCX.
+    def _read_attachments(self, messages: list[IncomingMessage]) -> list[str]:
+        """geo / нераспознанные вложения → подсказки модели.
 
-        Стикеры и видео сюда не доходят — orchestrator их отбрасывает.
+        Документ (PDF/Word/др.) сюда не доходит: orchestrator перехватывает
+        его раньше и уводит в DocumentRelay — файл целиком уходит владельцу
+        через MAX, минуя модель. Стикеры и видео тоже отбрасываются раньше.
         """
-        texts: list[str] = []
         hints: list[str] = []
         for m in messages:
-            if m.kind not in {"document", "geo", "unsupported"}:
+            if m.kind not in {"geo", "unsupported"}:
                 continue
             hint = attachments.hint_for(m.kind)
             if hint:
                 hints.append(hint)
-            if m.kind == "document" and m.media_url:
-                extracted = await attachments.extract_from_url(m.media_url)
-                if extracted:
-                    logger.info(
-                        "документ разобран chat=%s chars=%s", m.chat_id, len(extracted)
-                    )
-                    texts.append(f"(текст из документа клиента)\n{extracted}")
-                    if self.db is not None and m.message_id:
-                        self.db.set_message_text(
-                            m.message_id, extracted[:2000]
-                        )
-                else:
-                    hints.append(
-                        "Из документа текст не извлечён (скан/неподдерживаемый "
-                        "формат). Не выдумывай содержимое файла."
-                    )
-        return "\n".join(texts).strip(), hints
+        return hints
 
     async def _read_voice(
         self, messages: list[IncomingMessage]
@@ -359,10 +342,7 @@ class DialogService:
         if voice_text:
             user_text = f"{user_text}\n{voice_text}".strip()
 
-        att_text, att_hints = await self._read_attachments(messages)
-        hints += att_hints
-        if att_text:
-            user_text = f"{user_text}\n{att_text}".strip()
+        hints += self._read_attachments(messages)
 
         photo_hints, matches = await self._read_photos(
             messages, furniture=f"{known.get('furniture') or ''} {user_text}"
@@ -376,8 +356,6 @@ class DialogService:
                 user_text = "(клиент прислал фото)"
             elif "voice" in kinds:
                 user_text = "(клиент прислал голосовое)"
-            elif "document" in kinds:
-                user_text = "(клиент прислал документ)"
             elif "geo" in kinds:
                 user_text = "(клиент прислал геолокацию)"
             elif "unsupported" in kinds:

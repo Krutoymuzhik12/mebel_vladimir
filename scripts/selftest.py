@@ -693,6 +693,63 @@ async def main(argv: list[str]) -> int:
         db.get_awaiting(MAX_CHAT, "7001", ttl_minutes=-1) is None,
     )
 
+    # ---- Документы: своя карточка на каждый файл, без dedup по чату ----
+    # В отличие от цены, где на чат держим одну активную заявку, документов
+    # клиент может прислать несколько подряд (план + смету), и каждый должен
+    # стать своей карточкой, а не потеряться под первой.
+    from app.jobs.document_relay import DocumentRelay
+
+    doc_relay = DocumentRelay(db, wazzup, fake_max)
+    inbox.document_relay = doc_relay
+
+    cards_before = len(fake_max.cards)
+    doc_rid_1 = await doc_relay.on_client_sent_document(
+        chat_id="555000111", doc_url="https://cdn.example/plan.pdf", note="вот план кухни"
+    )
+    doc_rid_2 = await doc_relay.on_client_sent_document(
+        chat_id="555000111", doc_url="https://cdn.example/smeta.pdf"
+    )
+    failures += not check(
+        "оба документа открыли заявки", bool(doc_rid_1) and bool(doc_rid_2)
+    )
+    failures += not check(
+        "второй документ не подавил первый — нет dedup по чату",
+        doc_rid_1 != doc_rid_2 and len(fake_max.cards) == cards_before + 2,
+    )
+
+    await inbox.handle_update(cb(f"{ANSWER_PREFIX}{doc_rid_1}", cid="cb-doc-1"))
+    failures += not check(
+        "«Ответить» на документ тоже ставит ожидание",
+        db.get_awaiting(MAX_CHAT, "7001") == doc_rid_1,
+    )
+
+    before = len(wazzup.sent)
+    await inbox.handle_update(
+        owner_msg("Кухня по плану — 210 000, посчитаем точнее после замера")
+    )
+    sent_doc = wazzup.sent[before:]
+    failures += not check("ответ по документу ушёл клиенту", len(sent_doc) == 1)
+    if sent_doc:
+        failures += not check(
+            "текст владельца по документу передан как есть",
+            "210 000" in sent_doc[0][1],
+            sent_doc[0][1][:60],
+        )
+    row_doc1 = db.get_document_by_request_id(doc_rid_1)
+    failures += not check(
+        "заявка по документу закрыта",
+        row_doc1 and row_doc1["status"] == "delivered",
+        str(row_doc1.get("status") if row_doc1 else "нет"),
+    )
+
+    await inbox.handle_update(cb(f"{SKIP_PREFIX}{doc_rid_2}", cid="cb-doc-2"))
+    row_doc2 = db.get_document_by_request_id(doc_rid_2)
+    failures += not check(
+        "«Пропустить» закрыло заявку по документу",
+        row_doc2 and row_doc2["status"] == "skipped",
+        str(row_doc2.get("status") if row_doc2 else "нет"),
+    )
+
     settings.max_enabled = False
     settings.max_bot_token = ""
 

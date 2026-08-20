@@ -18,6 +18,7 @@ from app.core.gatekeeper import BOT_OWNED, START_CMD, STOP_CMD, Gatekeeper
 from app.core.quiet_hours import QuietHours
 from app.db.database import Database
 from app.jobs.avito_show_phone import AvitoShowPhoneJob
+from app.jobs.document_relay import DocumentRelay
 from app.jobs.followups import FollowUpJob
 from app.jobs.max_inbox import MaxInbox
 from app.jobs.price_relay import PriceRelay
@@ -40,11 +41,14 @@ class Orchestrator:
         self.dialog = DialogService(db)
         self.max_notifier = MaxNotifier(settings)
         self.price_relay = PriceRelay(db, wazzup, self.max_notifier)
+        self.document_relay = DocumentRelay(db, wazzup, self.max_notifier)
         self.avito_job = AvitoShowPhoneJob(db, wazzup, self.max_notifier)
         self.followup_job = FollowUpJob(
             settings, db, wazzup, self.quiet, self.max_notifier
         )
-        self.max_inbox = MaxInbox(settings, db, self.max_notifier, self.price_relay)
+        self.max_inbox = MaxInbox(
+            settings, db, self.max_notifier, self.price_relay, self.document_relay
+        )
         self.health = HealthWatch(settings, self.max_notifier)
         self.batcher = MessageBatcher(settings, self._on_batch)
         self._bg_tasks: list[asyncio.Task] = []
@@ -179,7 +183,46 @@ class Orchestrator:
             kind=msg.kind,
             external_id=msg.message_id or None,
         )
+
+        # Документ (PDF/Word/др.): содержимое не разбираем, файл целиком уходит
+        # владельцу через MAX — так же, как цена, но без модели в цепочке.
+        if msg.kind == "document":
+            await self._on_document(msg)
+            return
+
         await self.batcher.add(msg)
+
+    async def _on_document(self, msg: IncomingMessage) -> None:
+        request_id = await self.document_relay.on_client_sent_document(
+            chat_id=msg.chat_id, doc_url=msg.media_url or "", note=msg.text or ""
+        )
+        if request_id:
+            ack = (
+                "Файл получил, передал специалисту — он посмотрит и ответит "
+                "вам здесь."
+            )
+            logger.info(
+                "document forwarded chat=%s request_id=%s", msg.chat_id, request_id
+            )
+        else:
+            ack = (
+                "Файл получил, но сейчас не могу передать его специалисту. "
+                "Опишите, пожалуйста, коротко словами, что в файле, и я передам "
+                "менеджеру."
+            )
+            logger.warning("document forward failed chat=%s", msg.chat_id)
+
+        send = await self.wazzup.send_text(msg.chat_id, ack)
+        if send.ok:
+            self.db.add_message(
+                msg.chat_id,
+                role="assistant",
+                text=ack,
+                external_id=send.external_id or None,
+            )
+            if send.external_id:
+                self.db.mark_seen(send.external_id, msg.chat_id)
+            self.db.touch_bot_message(msg.chat_id)
 
     async def _on_staff_echo(self, msg: IncomingMessage) -> None:
         """Исходящее, отправленное не через наш API.

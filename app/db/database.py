@@ -137,10 +137,28 @@ class Database:
                     PRIMARY KEY (max_chat_id, max_user_id)
                 );
 
+                -- Клиент прислал документ (PDF/Word/др.) — не разбираем содержимое,
+                -- пересылаем владельцу ссылкой и ждём его ответ клиенту. Своя
+                -- таблица, а не price_requests: документов в чате может быть
+                -- несколько подряд, каждый — своя карточка, без dedup по чату.
+                CREATE TABLE IF NOT EXISTS document_requests (
+                    request_id TEXT PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
+                    doc_url TEXT NOT NULL DEFAULT '',
+                    doc_name TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    max_message_id TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_chats_status ON chats(status);
                 CREATE INDEX IF NOT EXISTS idx_chats_followup ON chats(status, followup_stage);
                 CREATE INDEX IF NOT EXISTS idx_price_pending
                     ON price_requests(chat_id, status);
+                CREATE INDEX IF NOT EXISTS idx_document_pending
+                    ON document_requests(chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_messages_chat
                     ON messages(chat_id, id);
                 """
@@ -578,6 +596,94 @@ class Database:
             conn.execute(
                 """
                 UPDATE price_requests
+                SET status=?, closed_at=?
+                WHERE request_id=?
+                """,
+                (status, _utc_now(), request_id),
+            )
+
+    # ---------- документы: пересылка владельцу без разбора содержимого ----------
+
+    def open_document_request(
+        self,
+        *,
+        request_id: str,
+        chat_id: str,
+        doc_url: str,
+        doc_name: str,
+        note: str = "",
+    ) -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO document_requests
+                    (request_id, chat_id, doc_url, doc_name, note, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (request_id, chat_id, doc_url, doc_name, note, now),
+            )
+
+    def set_document_max_message(self, request_id: str, mid: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE document_requests SET max_message_id=? WHERE request_id=?",
+                (mid, request_id),
+            )
+
+    def get_document_by_max_message(self, mid: str) -> dict[str, Any] | None:
+        if not mid:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM document_requests WHERE max_message_id=?",
+                (mid,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_document_by_request_id(self, request_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM document_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_pending_documents(self) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM document_requests WHERE status='pending'"
+            ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def latest_pending_document(self) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM document_requests
+                WHERE status='pending'
+                ORDER BY created_at DESC LIMIT 1
+                """
+            ).fetchone()
+        return dict(row) if row else None
+
+    def skip_document_request(self, request_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE document_requests
+                SET status='skipped', closed_at=?
+                WHERE request_id=? AND status='pending'
+                """,
+                (_utc_now(), request_id),
+            )
+
+    def close_document_request(self, request_id: str, *, delivered: bool) -> None:
+        status = "delivered" if delivered else "cancelled"
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE document_requests
                 SET status=?, closed_at=?
                 WHERE request_id=?
                 """,

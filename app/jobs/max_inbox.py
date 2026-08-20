@@ -3,6 +3,13 @@
 Long polling вместо вебхука: отдельный публичный адрес не нужен, а живёт цикл
 в том же процессе, что и остальные фоновые задачи.
 
+Через MAX сейчас идут два вида карточек — запрос цены (PriceRelay) и
+пересланный клиентский файл (DocumentRelay). Кнопки и текст у них одинаковые
+(«Ответить» / «Пропустить», payload = префикс + request_id), поэтому кнопку
+не привязываем к конкретному релею заранее: по request_id сначала смотрим
+среди цен, не нашли — среди документов. request_id — uuid4 в обоих релеях,
+так что совпадение чужого типа исключено практически полностью.
+
 Как заявка находит свой ответ — два пути, в порядке надёжности:
 
 1. Сотрудник ответил РЕПЛАЕМ на карточку. Тогда заявка известна точно, и
@@ -21,10 +28,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from app.config import ROOT, Settings
 from app.db.database import Database
+from app.jobs.document_relay import DocumentRelay
 from app.jobs.price_relay import PriceRelay
 from app.notify.max import ANSWER_PREFIX, SKIP_PREFIX, MaxNotifier
 from app.services.process_lock import ExclusiveLock
@@ -33,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 POLL_TIMEOUT = 30
 ERROR_BACKOFF = 5.0
+
+Kind = Literal["price", "document"]
 
 
 def _chat_id_of(update: dict[str, Any]) -> str:
@@ -71,11 +81,13 @@ class MaxInbox:
         db: Database,
         max_notifier: MaxNotifier,
         price_relay: PriceRelay,
+        document_relay: DocumentRelay | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
         self.max = max_notifier
         self.price_relay = price_relay
+        self.document_relay = document_relay
         self._marker: int | None = None
 
     async def run_forever(self) -> None:
@@ -127,6 +139,30 @@ class MaxInbox:
         elif kind == "message_created":
             await self._on_message(update)
 
+    # ---------- поиск заявки: цена или документ ----------
+
+    def _pending_by_request_id(
+        self, request_id: str
+    ) -> tuple[Kind, dict[str, Any]] | tuple[None, None]:
+        row = self.db.get_price_by_request_id(request_id)
+        if row and row.get("status") == "pending":
+            return "price", row
+        row = self.db.get_document_by_request_id(request_id)
+        if row and row.get("status") == "pending":
+            return "document", row
+        return None, None
+
+    def _pending_by_max_message(
+        self, mid: str
+    ) -> tuple[Kind, dict[str, Any]] | tuple[None, None]:
+        row = self.db.get_price_by_max_message(mid)
+        if row and row.get("status") == "pending":
+            return "price", row
+        row = self.db.get_document_by_max_message(mid)
+        if row and row.get("status") == "pending":
+            return "document", row
+        return None, None
+
     # ---------- нажатие кнопки ----------
 
     async def _on_callback(self, update: dict[str, Any]) -> None:
@@ -138,15 +174,18 @@ class MaxInbox:
 
         if payload.startswith(ANSWER_PREFIX):
             request_id = payload[len(ANSWER_PREFIX) :]
-            row = self.db.get_price_by_request_id(request_id)
-            if not row or row.get("status") != "pending":
+            kind, row = self._pending_by_request_id(request_id)
+            if row is None:
                 await self.max.answer_callback(
                     callback_id, "Эта заявка уже закрыта"
                 )
                 return
             self.db.set_awaiting(chat_id, user_id, request_id)
             logger.info(
-                "MAX: сотрудник %s отвечает на заявку %s", user_id, request_id
+                "MAX: сотрудник %s отвечает на заявку %s (%s)",
+                user_id,
+                request_id,
+                kind,
             )
             await self.max.answer_callback(callback_id, "Жду ваш ответ")
             # Всплывашку из answer_callback MAX не показывает, поэтому пишем
@@ -162,9 +201,13 @@ class MaxInbox:
 
         if payload.startswith(SKIP_PREFIX):
             request_id = payload[len(SKIP_PREFIX) :]
-            self.db.skip_price_request(request_id)
+            kind, _row = self._pending_by_request_id(request_id)
+            if kind == "document":
+                self.db.skip_document_request(request_id)
+            else:
+                self.db.skip_price_request(request_id)
             self.db.clear_awaiting_for_request(request_id)
-            logger.info("MAX: заявка %s пропущена", request_id)
+            logger.info("MAX: заявка %s (%s) пропущена", request_id, kind or "?")
             await self.max.answer_callback(
                 callback_id, "Пропущено — клиенту ничего не отправлено"
             )
@@ -186,15 +229,24 @@ class MaxInbox:
             return
 
         user_id = _user_id_of(update)
-        request_id = self._request_for(update, chat_id, user_id)
+        kind, request_id = self._request_for(update, chat_id, user_id)
         if not request_id:
             # обычная переписка сотрудников — не наше дело
             return
 
-        row = self.db.get_price_by_request_id(request_id)
-        client_chat = str((row or {}).get("chat_id") or "?")
+        if kind == "document" and self.document_relay is not None:
+            row = self.db.get_document_by_request_id(request_id)
+            client_chat = str((row or {}).get("chat_id") or "?")
+            ok = await self.document_relay.on_owner_max_message(
+                text, request_id=request_id
+            )
+        else:
+            row = self.db.get_price_by_request_id(request_id)
+            client_chat = str((row or {}).get("chat_id") or "?")
+            ok = await self.price_relay.on_owner_max_message(
+                text, request_id=request_id
+            )
 
-        ok = await self.price_relay.on_owner_max_message(text, request_id=request_id)
         if ok:
             self.db.clear_awaiting(chat_id, user_id)
             await self.max.send(f"✅ Отправлено клиенту {client_chat}")
@@ -206,16 +258,22 @@ class MaxInbox:
 
     def _request_for(
         self, update: dict[str, Any], chat_id: str, user_id: str
-    ) -> str | None:
-        """Какой заявке адресован этот текст."""
+    ) -> tuple[Kind, str] | tuple[None, None]:
+        """Какой заявке адресован этот текст: (тип, request_id)."""
         # Реплай на карточку — однозначно, состояние не нужно
         reply_mid = _reply_to_mid(update)
         if reply_mid:
-            row = self.db.get_price_by_max_message(reply_mid)
-            if row and row.get("status") == "pending":
-                return str(row["request_id"])
+            kind, row = self._pending_by_max_message(reply_mid)
+            if row is not None:
+                return kind, str(row["request_id"])
 
         # Иначе — заявка, на которую этот сотрудник нажал «Ответить»
-        return self.db.get_awaiting(
+        awaiting = self.db.get_awaiting(
             chat_id, user_id, ttl_minutes=self.settings.max_awaiting_ttl_min
         )
+        if not awaiting:
+            return None, None
+        kind, row = self._pending_by_request_id(awaiting)
+        if row is None:
+            return None, None
+        return kind, awaiting

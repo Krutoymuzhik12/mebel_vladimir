@@ -204,6 +204,47 @@ class MaxNotifier:
         ]
         return bool(await self.send(body, buttons=buttons))
 
+    async def document_request(
+        self,
+        *,
+        chat_id: str,
+        doc_url: str,
+        doc_name: str,
+        note: str,
+        request_id: str,
+    ) -> str:
+        """Клиент прислал файл — карточка со ссылкой, содержимое не разбираем.
+
+        Кнопки и обработка ответа те же, что у запроса цены (см.
+        app/jobs/max_inbox.py): «Ответить» переводит в режим ожидания текста
+        для этого сотрудника, «Пропустить» закрывает без ответа клиенту.
+        """
+        body = (
+            "📎 Клиент прислал файл\n"
+            f"Чат: {chat_id}\n"
+            f"request_id: {request_id}\n\n"
+            f"Файл: {doc_name}\n{doc_url}\n"
+        )
+        if note:
+            body += f"\nСообщение клиента:\n{note}"
+        buttons = [
+            [
+                {
+                    "type": "callback",
+                    "text": "✍️ Ответить",
+                    "payload": f"{ANSWER_PREFIX}{request_id}",
+                    "intent": "positive",
+                },
+                {
+                    "type": "callback",
+                    "text": "Пропустить",
+                    "payload": f"{SKIP_PREFIX}{request_id}",
+                    "intent": "negative",
+                },
+            ]
+        ]
+        return await self.send(body, buttons=buttons)
+
     async def avito_show_phone(self, *, chat_id: str, details: str = "") -> bool:
         """Клиенту не пишем — только уведомление владельцу."""
         body = f"📞 Авито: клиент посмотрел номер и не позвонил\nЧат: {chat_id}\n"
