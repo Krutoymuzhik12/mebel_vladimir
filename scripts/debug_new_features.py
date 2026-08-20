@@ -740,6 +740,62 @@ def test_baseline_keeps_live_dialog(db_path: Path) -> None:
     )
 
 
+def test_dialog_hygiene() -> None:
+    """Баги из прошлых интеграций, которые нельзя оставлять на совесть модели.
+
+    В присланных примерах бот здоровался в каждой реплике («Здравствуйте!
+    хорошо, чтобы вы понимали...», «Здравствуйте! простите, конечно!»), иногда
+    дважды подряд, и трижды повторил одну и ту же фразу про «напишите текстом».
+    Промпт это запрещает, но запрет — не гарантия, поэтому режем в коде.
+    """
+    from app.services.poe import strip_banned_openers, strip_greeting
+
+    cases = [
+        ("Здравствуйте! добрый день! Хорошо, посчитаем.", "Хорошо, посчитаем."),
+        ("Здравствуйте! хорошо, чтобы вы понимали порядок цифр",
+         "Хорошо, чтобы вы понимали порядок цифр"),
+        ("Добрый вечер! Кухня 3 метра — от 81 000.", "Кухня 3 метра — от 81 000."),
+    ]
+    for raw, want in cases:
+        got = strip_greeting(raw)
+        check(f"приветствие срезано: {raw[:34]!r}", got == want, got)
+
+    check(
+        "имя клиента после приветствия не теряется",
+        strip_greeting("Добрый день, Игорь! Посчитаем.").startswith("Игорь"),
+        strip_greeting("Добрый день, Игорь! Посчитаем."),
+    )
+    check(
+        "реплика без приветствия не тронута",
+        strip_greeting("Кухня от 81 000.") == "Кухня от 81 000.",
+    )
+    check(
+        "сообщение из одного приветствия не превращается в пустое",
+        strip_greeting("Здравствуйте!") == "Здравствуйте!",
+    )
+    check(
+        "«Понял вас» по-прежнему срезается",
+        not strip_banned_openers("Понял вас, посчитаем").lower().startswith("понял"),
+        strip_banned_openers("Понял вас, посчитаем"),
+    )
+
+    # Три неразобранных голосовых подряд → одна подсказка, а не три копии
+    from app.core.dialog import DialogService
+
+    svc = DialogService.__new__(DialogService)
+    same = "Клиент прислал голосовое, но разобрать речь не вышло."
+    block = DialogService._context_block(
+        svc, mode="продолжение", answers={"name": "Игорь"},
+        message="...", hints=[same, same, same],
+    )
+    check("одинаковые подсказки схлопнуты", block.count(same) == 1,
+          f"повторов={block.count(same)}")
+    check(
+        "известные поля перечислены как запрет переспрашивать",
+        "НЕ СПРАШИВАЙ ЗАНОВО" in block and "имя" in block,
+    )
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -869,6 +925,9 @@ def main() -> None:
 
         print("\n--- amoCRM: разбор полей и исключения ---")
         asyncio.run(test_amocrm_extraction(tmp))
+
+        print("\n--- Гигиена диалога: приветствия и повторы ---")
+        test_dialog_hygiene()
 
         print("\n--- Импорт из CRM не отбирает живой диалог ---")
         test_baseline_keeps_live_dialog(tmp / "live.db")

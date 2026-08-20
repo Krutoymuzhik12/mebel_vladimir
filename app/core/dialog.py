@@ -13,7 +13,7 @@ from app.config import settings
 from app.core.markers import Markers, extract
 from app.db.database import Database
 from app.services import attachments, media, transcription
-from app.services.poe import PoeClient
+from app.services.poe import PoeClient, strip_greeting
 from app.transports.base import IncomingMessage
 from app.vision.client import VisionClient
 
@@ -252,7 +252,10 @@ class DialogService:
             if phone
             else "ЦЕЛЬ РАЗГОВОРА: получить номер телефона и имя."
         )
-        hints_text = "\n".join(f"- {h}" for h in (hints or [])) or "- нет"
+        # Одинаковые подсказки схлопываем: три неразобранных голосовых подряд
+        # давали три копии одной строки, и модель начинала дублировать ответ.
+        unique_hints = list(dict.fromkeys(hints or []))
+        hints_text = "\n".join(f"- {h}" for h in unique_hints) or "- нет"
         return f"""[СЛУЖЕБНЫЙ БЛОК - клиент его не писал и не увидит]
 РЕЖИМ: {mode}
 Сегодня {human_date(date.today())}.
@@ -458,6 +461,15 @@ class DialogService:
             )
 
         clean, markers = extract(raw or "")
+        if mode != "первое обращение":
+            # Промпт это запрещает, но модель всё равно здоровается в каждой
+            # реплике, а иногда дважды подряд («Здравствуйте! добрый день!»).
+            # Режем в коде: клиенту сразу виден робот, который не помнит, что
+            # уже разговаривает с ним.
+            before = clean
+            clean = strip_greeting(clean)
+            if clean != before:
+                logger.info("срезал лишнее приветствие chat=%s", chat_id)
         if markers.price_request:
             wants_price = True
         return DialogResult(

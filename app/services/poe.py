@@ -55,6 +55,34 @@ def _system(prompt_file: str) -> list[dict[str, str]]:
     return [{"role": "system", "content": text}] if text else []
 
 
+_GREETING_RE = re.compile(
+    r"^\s*(?:здравствуйте|здравствуй|добрый\s+день|доброе\s+утро|"
+    r"добрый\s+вечер|доброго\s+времени(?:\s+суток)?|приветствую|привет)"
+    r"[\s,!.:;–—-]*",
+    re.I,
+)
+
+
+def strip_greeting(text: str) -> str:
+    """Срезать приветствие в начале реплики.
+
+    Модель здоровается в каждом сообщении, даже посреди разговора, и иногда
+    дважды подряд («Здравствуйте! добрый день!»). Запрет в промпте помогает
+    не всегда, а выглядит это хуже всего остального: сразу видно робота,
+    который не помнит, что уже говорил с человеком. Поэтому режем в коде,
+    и только там, где приветствие точно лишнее — не в первом обращении.
+    """
+    clean = (text or "").strip()
+    for _ in range(3):  # «Здравствуйте! Добрый день!» — два подряд
+        stripped = _GREETING_RE.sub("", clean, count=1)
+        if stripped == clean:
+            break
+        clean = stripped.lstrip()
+    if not clean:
+        return text
+    return clean[0].upper() + clean[1:]
+
+
 def strip_banned_openers(text: str) -> str:
     clean = _BANNED_OPENERS_RE.sub("", text or "", count=1)
     if clean and clean != text:
