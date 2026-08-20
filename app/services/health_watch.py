@@ -75,6 +75,10 @@ class HealthWatch:
             return False
 
     async def _maybe_alert(self, issues: list[str]) -> None:
+        # Владельца в MAX сейчас беспокоим только расчётами и файлами.
+        # Проблемы сервиса видны в логе и в /health — туда и смотрим.
+        if not self.settings.max_notify_health:
+            return
         # Не чаще раза в час, чтобы не спамить MAX
         now = time.monotonic()
         if now - self._last_alert_at < 3600:

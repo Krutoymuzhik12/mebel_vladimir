@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     max_enabled: bool = False
     # Сколько минут держим режим «сотрудник печатает ответ» после нажатия кнопки
     max_awaiting_ttl_min: float = 60.0
+    # Чем MAX вправе беспокоить владельца. Сейчас только расчёты и файлы:
+    # каждое лишнее уведомление обесценивает те, на которые надо реагировать.
+    max_notify_avito: bool = False
+    max_notify_health: bool = False
 
     company_name: str = ""
     manager_name: str = "Владимир"

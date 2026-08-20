@@ -16,6 +16,9 @@ from app.config import ROOT, Settings
 from app.core.gatekeeper import Gatekeeper
 from app.core.orchestrator import Orchestrator
 from app.db.database import Database
+from app.jobs.avito_show_phone import AvitoShowPhoneJob
+from app.jobs.document_relay import DocumentRelay
+from app.jobs.price_relay import PriceRelay
 from app.services import amocrm, attachments, backup
 from app.services.process_lock import ExclusiveLock
 from app.transports.base import SendResult
@@ -189,6 +192,73 @@ async def test_document_bypasses_dialog(settings: Settings, db_path: Path) -> No
     )
     await orch.wazzup.aclose()
     await orch.max_notifier.aclose()
+
+
+async def test_max_notify_scope(db_path: Path) -> None:
+    """MAX беспокоит владельца только расчётами и файлами.
+
+    Авито «показал номер» и алерты мониторинга по умолчанию выключены —
+    каждое лишнее уведомление обесценивает те, на которые надо реагировать.
+    """
+    from app.notify.max import MaxNotifier
+    from app.services.health_watch import HealthWatch
+
+    db = Database(db_path)
+    local = Settings(
+        wazzup_api_key="k", wazzup_send_enabled=False, test_mode=False,
+        max_enabled=True, max_bot_token="t", max_group_id="1",
+        poe_api_key="", vision_enabled=False,
+    )
+
+    class CountingMax(MaxNotifier):
+        def __init__(self, s):
+            super().__init__(s)
+            self.sent: list[str] = []
+
+        async def send(self, text, *, buttons=None):
+            self.sent.append(text)
+            return "mid-1"
+
+    wazzup = SilentWazzup(local, db)
+
+    # Авито: событие приходит, но в MAX не уходит и в БД не оседает
+    notifier = CountingMax(local)
+    job = AvitoShowPhoneJob(db, wazzup, notifier, local)
+    check("Авито-уведомления выключены по умолчанию", not job.enabled)
+    avito = wazzup.parse_webhook(
+        {"messages": [msg("a1", "system", chatType="avito", text="Клиент показал номер")]}
+    )[0]
+    await job.on_event(avito)
+    check("Авито show-phone не ушёл в MAX", notifier.sent == [], f"{notifier.sent}")
+    check(
+        "и не встал в очередь ретраев (иначе долбил бы вечно)",
+        db.candidates_show_phone() == [],
+    )
+    check("tick() тоже молчит", await job.tick() == 0)
+
+    # Мониторинг: проблема есть, но владельцу о ней не пишем
+    watch_max = CountingMax(local)
+    watch = HealthWatch(local, watch_max)
+    status = await watch.check()
+    check("монитор проблему видит", not status["ok"], f"{status['issues']}")
+    check("но в MAX её не шлёт", watch_max.sent == [], f"{watch_max.sent}")
+
+    # А расчёт и документ — уходят
+    price_max = CountingMax(local)
+    rid = await PriceRelay(db, wazzup, price_max).on_client_wants_price(
+        chat_id="chat-1", summary="кухня", ask="посчитать"
+    )
+    check("расчёт в MAX уходит", bool(rid) and len(price_max.sent) == 1)
+
+    doc_max = CountingMax(local)
+    doc_rid = await DocumentRelay(db, wazzup, doc_max).on_client_sent_document(
+        chat_id="chat-1", doc_url="http://x/plan.pdf"
+    )
+    check("файл в MAX уходит", bool(doc_rid) and len(doc_max.sent) == 1)
+
+    for n in (notifier, watch_max, price_max, doc_max):
+        await n.aclose()
+    await wazzup.aclose()
 
 
 async def test_send_retries(settings: Settings, db_path: Path) -> None:
@@ -388,6 +458,9 @@ def main() -> None:
 
         print("\n--- Документ уходит в MAX, минуя модель ---")
         asyncio.run(test_document_bypasses_dialog(settings, tmp / "doc.db"))
+
+        print("\n--- MAX: только расчёты и файлы ---")
+        asyncio.run(test_max_notify_scope(tmp / "scope.db"))
 
         print("\n--- Ретраи отправки ---")
         asyncio.run(test_send_retries(settings, tmp / "retry.db"))

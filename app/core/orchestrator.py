@@ -42,7 +42,7 @@ class Orchestrator:
         self.max_notifier = MaxNotifier(settings)
         self.price_relay = PriceRelay(db, wazzup, self.max_notifier)
         self.document_relay = DocumentRelay(db, wazzup, self.max_notifier)
-        self.avito_job = AvitoShowPhoneJob(db, wazzup, self.max_notifier)
+        self.avito_job = AvitoShowPhoneJob(db, wazzup, self.max_notifier, settings)
         self.followup_job = FollowUpJob(
             settings, db, wazzup, self.quiet, self.max_notifier
         )
