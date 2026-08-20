@@ -230,28 +230,20 @@ class DialogService:
         self,
         *,
         mode: str,
-        answers: dict[str, Any],
         message: str,
         hints: list[str] | None = None,
     ) -> str:
-        known_lines = [
-            f"{_FIELD_TITLES.get(k, k)}: {v}" for k, v in (answers or {}).items() if v
-        ]
-        known = "\n".join(known_lines) or "пока ничего не известно"
-        # Перечисляем поимённо: общего «не переспрашивай» модель слушается
-        # хуже, чем списка конкретных полей прямо перед ответом
-        filled = [_FIELD_TITLES.get(k, k) for k, v in (answers or {}).items() if v]
-        dont_ask = (
-            "НЕ СПРАШИВАЙ ЗАНОВО (это уже известно): " + ", ".join(filled)
-            if filled
-            else "Пока не известно ничего — уместно спросить самое нужное."
-        )
-        phone = bool(answers.get("phone"))
-        goal = (
-            "ЦЕЛЬ РАЗГОВОРА: довести до расчёта/следующего шага. Телефон уже есть."
-            if phone
-            else "ЦЕЛЬ РАЗГОВОРА: получить номер телефона и имя."
-        )
+        """Служебный блок: только то, чего модель не может узнать сама.
+
+        Накопленные факты о клиенте сюда намеренно НЕ кладём. Имя, телефон и
+        размеры уже сказаны клиентом в истории переписки, которая идёт этому
+        же запросу — дублировать их значит завести второй источник правды,
+        который рано или поздно разойдётся с первым. Всё, что модель способна
+        прочитать в диалоге, она читает в диалоге.
+
+        Факты в базе остаются: они нужны коду — для подбора по каталогу и
+        для выбора дожима, — но модели передаются самим разговором.
+        """
         # Одинаковые подсказки схлопываем: три неразобранных голосовых подряд
         # давали три копии одной строки, и модель начинала дублировать ответ.
         unique_hints = list(dict.fromkeys(hints or []))
@@ -260,13 +252,6 @@ class DialogService:
 РЕЖИМ: {mode}
 Сегодня {human_date(date.today())}.
 ТЕБЯ ЗОВУТ {settings.manager_name}. Компания: {settings.company_name}.
-
-Что известно о клиенте и заказе:
-{known}
-
-{dont_ask}
-
-{goal}
 
 Подсказки системы:
 {hints_text}
@@ -444,7 +429,6 @@ class DialogService:
                 history,
                 self._context_block(
                     mode=mode,
-                    answers={**known, **{k: v for k, v in extracted.items() if v}},
                     message=user_text,
                     hints=hints,
                 ),
