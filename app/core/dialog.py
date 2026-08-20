@@ -238,6 +238,14 @@ class DialogService:
             f"{_FIELD_TITLES.get(k, k)}: {v}" for k, v in (answers or {}).items() if v
         ]
         known = "\n".join(known_lines) or "пока ничего не известно"
+        # Перечисляем поимённо: общего «не переспрашивай» модель слушается
+        # хуже, чем списка конкретных полей прямо перед ответом
+        filled = [_FIELD_TITLES.get(k, k) for k, v in (answers or {}).items() if v]
+        dont_ask = (
+            "НЕ СПРАШИВАЙ ЗАНОВО (это уже известно): " + ", ".join(filled)
+            if filled
+            else "Пока не известно ничего — уместно спросить самое нужное."
+        )
         phone = bool(answers.get("phone"))
         goal = (
             "ЦЕЛЬ РАЗГОВОРА: довести до расчёта/следующего шага. Телефон уже есть."
@@ -252,6 +260,8 @@ class DialogService:
 
 Что известно о клиенте и заказе:
 {known}
+
+{dont_ask}
 
 {goal}
 
@@ -363,12 +373,16 @@ class DialogService:
         history_rows = (
             self.db.recent_messages(chat_id, self.history_limit) if self.db else []
         )
+        # Текущий батч уже лежит в БД. Убираем его из истории: иначе сообщение
+        # клиента уходит модели дважды — последней репликой и ещё раз внутри
+        # служебного блока. От такого дубля модель принимает служебный блок за
+        # новый заход и здоровается повторно.
+        past_rows = history_rows[: -len(messages)] if messages else history_rows
         history = [
             {"role": r["role"], "content": r["text"]}
-            for r in history_rows
+            for r in past_rows
             if r.get("text") and r.get("role") in {"user", "assistant"}
         ]
-        # текущий батч уже в БД как user — history его содержит
 
         intent_name: str | None = None
         confidence = 0.0
@@ -406,9 +420,11 @@ class DialogService:
                 matches = picked
                 hints.append(self._catalog_hint(picked))
 
-        mode = "продолжение"
-        if len(history_rows) <= max(1, len(messages)):
-            mode = "первое обращение"
+        # Здороваемся, только если бот в этом чате ещё ни разу не говорил.
+        # Считать по длине истории ненадёжно: фото и голосовые лежат в БД с
+        # пустым текстом, и чат из трёх картинок выглядел как первый контакт.
+        bot_spoke_before = any(r.get("role") == "assistant" for r in past_rows)
+        mode = "продолжение" if bot_spoke_before else "первое обращение"
 
         if wants_price:
             hints.append(

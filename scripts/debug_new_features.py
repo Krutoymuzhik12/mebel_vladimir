@@ -531,6 +531,114 @@ async def test_amocrm_extraction(tmp: Path) -> None:
     )
 
 
+async def test_first_contact_policy(tmp: Path) -> None:
+    """Главное требование: бот берёт только тех, кто пришёл впервые.
+
+    Отличить старого клиента от нового по данным Wazzup нельзя, поэтому при
+    политике safe незнакомый чат считается старым и бот молчит. Ловушка,
+    которая это однажды отменила: remember_route делает upsert_chat, а тот
+    заводит строку со статусом new — если вызвать его до решения, чат станет
+    «нашим» раньше, чем мы успели спросить.
+    """
+    common = dict(
+        wazzup_api_key="k", wazzup_send_enabled=False, test_mode=False,
+        poe_api_key="", max_enabled=False, vision_enabled=False,
+        backup_enabled=False, health_watch_enabled=False, fast_mode=True,
+    )
+
+    # safe: незнакомый чат — молчим
+    safe = Settings(**common, first_contact_policy="safe")
+    db = Database(tmp / "fc_safe.db")
+    w = SilentWazzup(safe, db)
+    orch = Orchestrator(safe, db, w)
+    for m in w.parse_webhook({"messages": [msg("p1", "text", text="привет")]}):
+        await orch.ingest(m)
+    row = db.get_chat("chat-1")
+    check(
+        "safe: незнакомый чат помечен старым",
+        row and row["status"] == "existing",
+        str(row.get("status") if row else "нет чата"),
+    )
+    check("safe: клиенту не ответили", w.sent == [], f"{w.sent}")
+    check(
+        "safe: роутинг всё равно сохранён (пригодится менеджеру)",
+        bool(row and row.get("channel_id")),
+    )
+    await w.aclose()
+
+    # свежий канал: там истории нет, чат берём
+    fresh = Settings(**common, first_contact_policy="safe", fresh_channel_ids="ch-1")
+    db2 = Database(tmp / "fc_fresh.db")
+    w2 = SilentWazzup(fresh, db2)
+    orch2 = Orchestrator(fresh, db2, w2)
+    for m in w2.parse_webhook({"messages": [msg("p2", "text", text="привет")]}):
+        await orch2.ingest(m)
+    row2 = db2.get_chat("chat-1")
+    check(
+        "свежий канал: чат достаётся боту",
+        row2 and row2["status"] == "new",
+        str(row2.get("status") if row2 else "нет чата"),
+    )
+    await w2.aclose()
+
+    # open: старое поведение доступно явным флагом
+    op = Settings(**common, first_contact_policy="open")
+    db3 = Database(tmp / "fc_open.db")
+    w3 = SilentWazzup(op, db3)
+    orch3 = Orchestrator(op, db3, w3)
+    for m in w3.parse_webhook({"messages": [msg("p3", "text", text="привет")]}):
+        await orch3.ingest(m)
+    row3 = db3.get_chat("chat-1")
+    check(
+        "open: незнакомый чат считается новым",
+        row3 and row3["status"] == "new",
+        str(row3.get("status") if row3 else "нет чата"),
+    )
+    await w3.aclose()
+
+    check("политика safe включена по умолчанию",
+          Settings().first_contact_policy == "safe")
+
+
+async def test_max_reply_takes_over(tmp: Path) -> None:
+    """Ответ владельца из MAX = перехват: дальше клиента ведёт он."""
+    from app.notify.max import MaxNotifier
+
+    local = Settings(
+        wazzup_api_key="k", wazzup_send_enabled=False, test_mode=False,
+        max_enabled=True, max_bot_token="t", max_group_id="1",
+        poe_api_key="", vision_enabled=False,
+    )
+
+    class QuietMax(MaxNotifier):
+        async def send(self, text, *, buttons=None):
+            return "mid-1"
+
+    db = Database(tmp / "takeover.db")
+    w = SilentWazzup(local, db)
+    relay = PriceRelay(db, w, QuietMax(local), local)
+
+    db.upsert_chat("chat-1", status="new")
+    rid = await relay.on_client_wants_price(
+        chat_id="chat-1", summary="кухня", ask="посчитать"
+    )
+    check("заявка открыта", bool(rid))
+    check(
+        "до ответа владельца чат ещё за ботом",
+        db.get_chat("chat-1")["status"] == "new",
+    )
+
+    ok = await relay.on_owner_max_message("Кухня — 145 000", request_id=rid)
+    check("ответ владельца ушёл клиенту", ok)
+    check(
+        "после ответа владельца чат в manual — бот замолчал",
+        db.get_chat("chat-1")["status"] == "manual",
+        db.get_chat("chat-1")["status"],
+    )
+    check("перехват включён по умолчанию", Settings().max_reply_takes_over is True)
+    await w.aclose()
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -612,6 +720,10 @@ def main() -> None:
         backup_enabled=False,
         health_watch_enabled=False,
         fast_mode=True,
+        # Канал теста объявлен свежим — иначе политика safe (умолчание)
+        # пометит незнакомый чат старым, и до пайплайна дело не дойдёт.
+        # В бою так же настроен наш телеграм-бот.
+        fresh_channel_ids="ch-1",
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -647,6 +759,12 @@ def main() -> None:
 
         print("\n--- amoCRM baseline (заглушка) ---")
         asyncio.run(test_amocrm_baseline(tmp))
+
+        print("\n--- Бот берёт только новых клиентов ---")
+        asyncio.run(test_first_contact_policy(tmp))
+
+        print("\n--- Ответ владельца из MAX = перехват ---")
+        asyncio.run(test_max_reply_takes_over(tmp))
 
         print("\n--- amoCRM: разбор полей и исключения ---")
         asyncio.run(test_amocrm_extraction(tmp))

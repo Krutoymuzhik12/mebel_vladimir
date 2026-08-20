@@ -101,6 +101,10 @@ async def main(argv: list[str]) -> int:
     settings.test_mode = True
     settings.test_channel_ids = CHANNEL_ID
     settings.test_chat_types = ""
+    # Тестовый канал — заведомо свежий, истории до бота там нет. В бою так же
+    # настроен наш телеграм-бот: FRESH_CHANNEL_IDS=<его uuid>.
+    settings.fresh_channel_ids = CHANNEL_ID
+    settings.first_contact_policy = "safe"
     settings.fast_mode = True  # без пауз, короткий батч
     if not with_poe:
         settings.poe_api_key = ""  # без сети: диалог отдаст fallback

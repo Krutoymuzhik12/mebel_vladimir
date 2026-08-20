@@ -2,7 +2,12 @@
 
 1. Intent → пушим в MAX; pending открываем только после успешного пуша.
 2. Владелец отвечает с request_id (или единственный pending).
-3. Текст as-is → клиенту в Wazzup.
+3. Текст as-is → клиенту в Wazzup, чат уходит в manual.
+
+Ответ владельца из MAX = перехват (MAX_REPLY_TAKES_OVER=1). Владелец
+уже лично написал клиенту, значит дальше ведёт разговор он, и бот в
+этом чате замолкает. Иначе получилось бы, что после цены от хозяина
+бот продолжает говорить поверх него.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ import logging
 import re
 import uuid
 
+from app.config import Settings
 from app.db.database import Database
 from app.notify.max import MaxNotifier
 from app.transports.wazzup import WazzupTransport
@@ -26,10 +32,12 @@ class PriceRelay:
         db: Database,
         wazzup: WazzupTransport,
         max_notifier: MaxNotifier,
+        settings: Settings | None = None,
     ) -> None:
         self.db = db
         self.wazzup = wazzup
         self.max_notifier = max_notifier
+        self.settings = settings or max_notifier.settings
 
     async def on_client_wants_price(
         self,
@@ -102,6 +110,12 @@ class PriceRelay:
             self.db.close_price_request(row["request_id"], delivered=True)
             self.db.add_message(chat_id, role="assistant", text=client_text)
             self.db.touch_bot_message(chat_id)
+            if self.settings.max_reply_takes_over:
+                # Владелец ответил лично — дальше ведёт он, бот молчит
+                self.db.upsert_chat(chat_id, status="manual")
+                logger.info(
+                    "chat=%s → manual (ответ владельца из MAX)", chat_id
+                )
             logger.info("price relayed request_id=%s chat=%s", row["request_id"], chat_id)
             return True
 

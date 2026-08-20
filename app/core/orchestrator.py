@@ -40,8 +40,8 @@ class Orchestrator:
         self.gate = Gatekeeper(db)
         self.dialog = DialogService(db)
         self.max_notifier = MaxNotifier(settings)
-        self.price_relay = PriceRelay(db, wazzup, self.max_notifier)
-        self.document_relay = DocumentRelay(db, wazzup, self.max_notifier)
+        self.price_relay = PriceRelay(db, wazzup, self.max_notifier, settings)
+        self.document_relay = DocumentRelay(db, wazzup, self.max_notifier, settings)
         self.avito_job = AvitoShowPhoneJob(db, wazzup, self.max_notifier, settings)
         self.followup_job = FollowUpJob(
             settings, db, wazzup, self.quiet, self.max_notifier
@@ -144,6 +144,22 @@ class Orchestrator:
         if msg.message_id:
             self.db.mark_seen(msg.message_id, msg.chat_id)
 
+        # Судьбу незнакомого чата решаем ДО любой записи в таблицу chats.
+        # remember_route ниже делает upsert_chat, а тот создаёт строку со
+        # статусом new по умолчанию — и чат становится «известным и нашим»
+        # раньше, чем мы успели спросить, наш ли он. Так безопасное умолчание
+        # отменялось молча, без единой ошибки в логе.
+        # Эхо сюда не пускаем: у нового клиента автоответ площадки приходит
+        # тем же эхом, и политика записала бы его в старые.
+        status = self.gate.status(msg.chat_id)
+        if status is None and not msg.is_echo:
+            status = self.gate.on_unknown_chat(
+                msg.chat_id,
+                channel_id=msg.channel_id,
+                fresh_channels=self.settings.fresh_channel_id_set,
+                policy=self.settings.first_contact_policy,
+            )
+
         # Запоминаем, куда отвечать: без channelId+chatType Wazzup ответ не примет
         self.db.remember_route(
             msg.chat_id, channel_id=msg.channel_id, chat_type=msg.channel
@@ -163,13 +179,6 @@ class Orchestrator:
         if self.wazzup.looks_like_avito_show_phone(msg):
             await self.avito_job.on_event(msg)
             return
-
-        status = self.gate.status(msg.chat_id)
-        if status is None:
-            # незнакомый чат: первое входящее считаем первым контактом
-            status = self.gate.classify_first_seen(
-                msg.chat_id, had_prior_human_outgoing=False
-            )
 
         if status != BOT_OWNED:
             logger.info("skip chat=%s status=%s", msg.chat_id, status)

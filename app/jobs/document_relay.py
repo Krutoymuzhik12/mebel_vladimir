@@ -19,6 +19,7 @@ import re
 import uuid
 from urllib.parse import unquote, urlparse
 
+from app.config import Settings
 from app.db.database import Database
 from app.notify.max import MaxNotifier
 from app.transports.wazzup import WazzupTransport
@@ -40,10 +41,12 @@ class DocumentRelay:
         db: Database,
         wazzup: WazzupTransport,
         max_notifier: MaxNotifier,
+        settings: Settings | None = None,
     ) -> None:
         self.db = db
         self.wazzup = wazzup
         self.max_notifier = max_notifier
+        self.settings = settings or max_notifier.settings
 
     async def on_client_sent_document(
         self, *, chat_id: str, doc_url: str, note: str = ""
@@ -112,6 +115,12 @@ class DocumentRelay:
             self.db.close_document_request(row["request_id"], delivered=True)
             self.db.add_message(chat_id, role="assistant", text=client_text)
             self.db.touch_bot_message(chat_id)
+            if self.settings.max_reply_takes_over:
+                # Владелец ответил лично — дальше ведёт он, бот молчит
+                self.db.upsert_chat(chat_id, status="manual")
+                logger.info(
+                    "chat=%s → manual (ответ владельца из MAX)", chat_id
+                )
             logger.info(
                 "document relayed request_id=%s chat=%s", row["request_id"], chat_id
             )

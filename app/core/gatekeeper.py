@@ -44,6 +44,44 @@ class Gatekeeper:
         self.db.upsert_chat(chat_id, status=BOT_OWNED)
         logger.info("chat=%s → new (first contact)", chat_id)
 
+    def on_unknown_chat(
+        self,
+        chat_id: str,
+        *,
+        channel_id: str = "",
+        fresh_channels: set[str] | None = None,
+        policy: str = "safe",
+    ) -> ChatStatus:
+        """Незнакомый чат: новый клиент или старый, о котором мы не знаем?
+
+        Отличить по данным Wazzup нельзя — API не отдаёт ни списка чатов, ни
+        истории переписки, в вебхуке приходит только само новое сообщение.
+        Поэтому решает политика, и по умолчанию она безопасная.
+
+        Цена ошибки несимметрична. Промолчать новому клиенту — потерять
+        одного: менеджер увидит чат и ответит руками, как делал раньше.
+        Ответить старому — поздороваться «меня зовут Владимир, что
+        подбираете?» с человеком, который заказывал три года назад. Второе
+        бьёт по репутации сразу и по всем, кто напишет в этот день.
+
+        Исключение — каналы из fresh_channels: там истории до бота нет по
+        определению, молчать не от кого.
+        """
+        current = self.status(chat_id)
+        if current:
+            return current
+
+        if channel_id and channel_id.lower() in (fresh_channels or set()):
+            self.claim_new(chat_id)
+            return BOT_OWNED
+
+        if (policy or "safe").strip().lower() == "open":
+            self.claim_new(chat_id)
+            return BOT_OWNED
+
+        self.mark_existing(chat_id, reason="незнакомый чат, политика safe")
+        return NOT_OURS
+
     def classify_first_seen(
         self, chat_id: str, *, had_prior_human_outgoing: bool
     ) -> ChatStatus:

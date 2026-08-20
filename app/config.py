@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     # Нужно для тестовых: наш телеграм уже завёл контакт в amoCRM, и после
     # пересоздания базы бот замолчал бы в собственном тестовом чате.
     baseline_exclude_chat_ids: str = ""
+    # Незнакомый чат: safe — считаем его старым и молчим; open — считаем
+    # первым контактом и отвечаем. Отличить по данным Wazzup невозможно:
+    # ни списка чатов, ни истории он не отдаёт. Дефолт safe намеренно —
+    # промолчать новому клиенту дешевле, чем поздороваться со старым.
+    first_contact_policy: str = "safe"
+    # UUID каналов, где истории до бота нет по определению (свежий бот,
+    # тестовый канал) — там незнакомый чат безопасно считать новым.
+    fresh_channel_ids: str = ""
+    # Ответ владельца из MAX = перехват: дальше он ведёт клиента сам
+    max_reply_takes_over: bool = True
 
     # ---------- Тестовый режим ----------
     # 1 — слушаем только каналы из test_channel_ids / test_chat_types
@@ -149,6 +159,10 @@ class Settings(BaseSettings):
     @property
     def baseline_exclude_set(self) -> set[str]:
         return self._csv_set(self.baseline_exclude_chat_ids)
+
+    @property
+    def fresh_channel_id_set(self) -> set[str]:
+        return self._csv_set(self.fresh_channel_ids)
 
     def public_media_url(self, rel_path: str) -> str:
         """Ссылка на файл каталога, которую примет Wazzup.
