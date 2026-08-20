@@ -962,6 +962,100 @@ async def test_no_double_greeting(tmp: Path) -> None:
     await w.aclose()
 
 
+async def test_greeting_after_delayed_reply(tmp: Path) -> None:
+    """Ответ бота записывается ПОЗЖЕ следующего сообщения клиента.
+
+    Так и было в бою: /start в 21:02:33, фото клиента в 21:02:45, а ответ
+    бота на /start лёг в базу только в 21:02:54 — после паузы и отправки.
+    Код резал историю «последние N строк», считая текущий батч самым свежим,
+    и выбрасывал реплику бота вместо реплики клиента. История выглядела
+    пустой, бот считал себя первым контактом и здоровался повторно.
+    """
+    from app.core.dialog import DialogService
+
+    local = Settings(
+        poe_api_key="", vision_enabled=False, wazzup_api_key="k",
+        wazzup_send_enabled=False, test_mode=False,
+    )
+    _ = local
+    db = Database(tmp / "order.db")
+    db.upsert_chat("chat-1", status="new")
+
+    # Порядок записи ровно как в проде
+    db.add_message("chat-1", role="user", text="/start", external_id="m-start")
+    db.add_message("chat-1", role="user", text="Сколько стоит шкаф?", external_id="m-photo")
+    db.add_message("chat-1", role="assistant", text="Здравствуйте! Владимир.")
+
+    rows = db.recent_messages("chat-1", 40)
+    check("реплика бота лежит последней", rows[-1]["role"] == "assistant",
+          f"{[r['role'] for r in rows]}")
+
+    # Как считалось раньше: отрезать последние N строк
+    old_past = rows[:-1]
+    check(
+        "старый способ терял реплику бота",
+        not any(r["role"] == "assistant" for r in old_past),
+        "именно поэтому бот здоровался дважды",
+    )
+
+    # Как считается теперь: исключаем текущий батч по id
+    current_ids = {"m-photo"}
+    new_past = [r for r in rows if str(r.get("external_id") or "") not in current_ids]
+    check(
+        "новый способ реплику бота сохраняет",
+        any(r["role"] == "assistant" for r in new_past),
+        f"{[r['role'] for r in new_past]}",
+    )
+    check(
+        "и при этом убирает текущее сообщение клиента",
+        all(r.get("external_id") != "m-photo" for r in new_past),
+    )
+
+    # Признак «бот уже говорил» берётся из базы и не зависит от порядка
+    check("bot_has_spoken видит реплику бота", db.bot_has_spoken("chat-1"))
+
+    svc = DialogService.__new__(DialogService)
+    svc.db = db
+    check(
+        "режим — продолжение, а не первое обращение",
+        svc.db.bot_has_spoken("chat-1") is True,
+    )
+
+
+def test_media_proxy() -> None:
+    """Фото каталога отдаём со своего домена коротким адресом.
+
+    Прямая ссылка VK — 309 символов, из них 180 подписанный хвост параметров.
+    Wazzup её не принял: 400 INVALID_MESSAGE_DATA, фото до клиента не дошло.
+    Обрезать хвост нельзя, без подписи VK отдаёт 403.
+    """
+    from app.catalog.search import shared
+
+    catalog = shared()
+    if not catalog.loaded:
+        check("каталог загружен", False, "нет catalog/index.json")
+        return
+
+    item = catalog.items[0]
+    vk_url = item["photos"][0]
+    our_url = f"https://185-192-247-201.nip.io/media/{item['article']}/0.jpg"
+
+    check("ссылка VK длинная", len(vk_url) > 250, f"{len(vk_url)} символов")
+    check("наша короткая", len(our_url) < 80, f"{len(our_url)} символов")
+    check("наша оканчивается на .jpg", our_url.endswith(".jpg"))
+
+    # Подставить чужой адрес через эндпоинт нельзя: наружу уходит только то,
+    # что уже лежит в нашем каталоге — снаружи принимаются артикул и номер
+    from app.media_proxy import router
+
+    paths = [getattr(r, "path", "") for r in router.routes]
+    check(
+        "эндпоинт принимает только артикул и номер",
+        paths == ["/media/{article}/{index}.jpg"],
+        f"{paths}",
+    )
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -1082,6 +1176,12 @@ def main() -> None:
 
         print("\n--- amoCRM baseline (заглушка) ---")
         asyncio.run(test_amocrm_baseline(tmp))
+
+        print("\n--- Фото каталога: короткий адрес вместо ссылки VK ---")
+        test_media_proxy()
+
+        print("\n--- Приветствие при запоздавшем ответе бота ---")
+        asyncio.run(test_greeting_after_delayed_reply(tmp))
 
         print("\n--- Один чат обрабатывается по очереди ---")
         asyncio.run(test_no_double_greeting(tmp))

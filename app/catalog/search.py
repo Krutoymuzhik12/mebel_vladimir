@@ -72,6 +72,11 @@ class CatalogSearch:
     def size(self) -> int:
         return len(self._items)
 
+    @property
+    def items(self) -> list[dict[str, Any]]:
+        """Позиции каталога. Нужны отдаче фото: там ищут по артикулу."""
+        return self._items
+
     def types(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for item in self._items:

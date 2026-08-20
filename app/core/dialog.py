@@ -352,7 +352,17 @@ class DialogService:
         # клиента уходит модели дважды — последней репликой и ещё раз внутри
         # служебного блока. От такого дубля модель принимает служебный блок за
         # новый заход и здоровается повторно.
-        past_rows = history_rows[: -len(messages)] if messages else history_rows
+        #
+        # Исключаем именно ЭТИ сообщения по их id, а не «последние N строк».
+        # По позиции резать нельзя: ответ бота на прошлый батч записывается
+        # после отправки, а перед ней пауза 5-8 секунд — и он оказывается в
+        # таблице ПОЗЖЕ, чем следующее сообщение клиента. Отрезание с конца
+        # выбрасывало реплику бота вместо реплики клиента, история выглядела
+        # пустой, и бот здоровался повторно.
+        current_ids = {m.message_id for m in messages if m.message_id}
+        past_rows = [
+            r for r in history_rows if str(r.get("external_id") or "") not in current_ids
+        ]
         history = [
             {"role": r["role"], "content": r["text"]}
             for r in past_rows
@@ -398,7 +408,14 @@ class DialogService:
         # Здороваемся, только если бот в этом чате ещё ни разу не говорил.
         # Считать по длине истории ненадёжно: фото и голосовые лежат в БД с
         # пустым текстом, и чат из трёх картинок выглядел как первый контакт.
-        bot_spoke_before = any(r.get("role") == "assistant" for r in past_rows)
+        # Спрашиваем базу напрямую, а не считаем по обрезанной истории: та
+        # ограничена сорока сообщениями и зависит от порядка записи, а нам
+        # нужен простой факт — говорил ли бот в этом чате хоть раз.
+        bot_spoke_before = (
+            self.db.bot_has_spoken(chat_id)
+            if self.db is not None
+            else any(r.get("role") == "assistant" for r in past_rows)
+        )
         mode = "продолжение" if bot_spoke_before else "первое обращение"
 
         if wants_price:

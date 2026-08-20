@@ -438,14 +438,21 @@ class Orchestrator:
         if not matches or not self.settings.send_catalog_photos:
             return
         for item in matches[: max(1, self.settings.catalog_photos_limit)]:
-            # Новый каталог хранит прямые ссылки на фото — Wazzup заберёт их
-            # сам. Путь на диске остаётся запасным путём для старой выгрузки.
+            # Ссылку VK Wazzup не принимает: 300+ символов, из них две трети —
+            # подписанный хвост параметров, в ответ 400 INVALID_MESSAGE_DATA.
+            # Поэтому отдаём фото со своего домена коротким адресом, а байты
+            # подтягиваем из VK на лету (см. app/media_proxy.py).
             photos = item.get("photos") or []
-            url = str(photos[0]) if photos else self.settings.public_media_url(
-                str(item.get("photo_path") or "")
-            )
+            article = str(item.get("article") or "")
+            base = (self.settings.public_webhook_url or "").rstrip("/")
+            if photos and article and base:
+                url = f"{base}/media/{article}/0.jpg"
+            else:
+                url = self.settings.public_media_url(str(item.get("photo_path") or ""))
             if not url:
-                logger.info("фото каталога не отправлено: нет ссылки")
+                logger.info(
+                    "фото каталога не отправлено: нет PUBLIC_WEBHOOK_URL или артикула"
+                )
                 return
             caption = self._photo_caption(item)
             send = await self.wazzup.send_media(chat_id, url, caption=caption)

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.core.orchestrator import Orchestrator
+from app.media_proxy import router as media_router
 from app.db.database import Database
 from app.services import transcription
 from app.transports.wazzup import WazzupTransport
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Vladimir mebel osnova", lifespan=lifespan)
+app.include_router(media_router)
 
 
 @app.get("/health")
