@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     test_channel_ids: str = ""
     # Типы чатов через запятую: telegram, whatsapp, avito, instagram, vk, max
     test_chat_types: str = ""
+    # В тестовом режиме отвечать только этим chat_id (через запятую).
+    # Пусто — ограничения нет, работает весь разрешённый канал.
+    # Нужно, чтобы на живом канале бот отвечал только тестировщикам, даже
+    # если туда случайно напишет настоящий клиент.
+    test_chat_ids: str = ""
+    # /start в тестовом режиме стирает чат из базы: следующее сообщение
+    # пойдёт как первый контакт. В бою выключено — клиент, набравший
+    # /start, не должен терять историю переписки.
+    test_reset_on_start: bool = True
     # Логировать сырой payload вебхука целиком (для разбора форматов)
     log_raw_webhook: bool = False
     # 0 — «сухой» прогон: считаем ответ, но не отправляем клиенту.
@@ -162,6 +171,10 @@ class Settings(BaseSettings):
     @property
     def test_chat_type_set(self) -> set[str]:
         return self._csv_set(self.test_chat_types)
+
+    @property
+    def test_chat_id_set(self) -> set[str]:
+        return self._csv_set(self.test_chat_ids)
 
     @property
     def baseline_exclude_set(self) -> set[str]:

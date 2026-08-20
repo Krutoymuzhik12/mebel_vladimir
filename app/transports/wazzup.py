@@ -83,6 +83,20 @@ class WazzupTransport:
             return True
         return False
 
+    def chat_allowed(self, chat_id: str) -> bool:
+        """В тестовом режиме — только перечисленные chat_id.
+
+        Канал уже отфильтрован, но на нём может сидеть и настоящий клиент.
+        Пустой список означает «ограничения нет»: так режим включается по
+        каналу целиком, как было раньше.
+        """
+        if not self.settings.test_mode:
+            return True
+        allowed = self.settings.test_chat_id_set
+        if not allowed:
+            return True
+        return (chat_id or "").strip().lower() in allowed
+
     # ---------- разбор webhook ----------
 
     def parse_webhook(self, payload: dict[str, Any]) -> list[IncomingMessage]:
@@ -263,6 +277,13 @@ class WazzupTransport:
         # но дожимы и релей цены отправляют по сохранённому в БД роутингу, а не
         # в ответ на входящее. Пока идёт тест, наружу не должно уйти ничего,
         # кроме разрешённого канала — даже из старых чатов в базе.
+        if self.settings.test_mode and not self.chat_allowed(chat_id):
+            logger.warning(
+                "ТЕСТ: отправка заблокирована — chat=%s не в списке TEST_CHAT_IDS",
+                chat_id,
+            )
+            return SendResult(ok=False, error="chat not allowed in test mode")
+
         if self.settings.test_mode and not self.channel_allowed(channel_id, chat_type):
             logger.warning(
                 "ТЕСТ: отправка заблокирована — канал %s (%s) не в списке "

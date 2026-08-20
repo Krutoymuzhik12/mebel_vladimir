@@ -160,6 +160,27 @@ class Orchestrator:
             )
             return
 
+        # Тестовый режим: на разрешённом канале может сидеть и настоящий
+        # клиент, поэтому дополнительно отсекаем всех, кроме тестировщиков
+        if not self.wazzup.chat_allowed(msg.chat_id):
+            logger.info(
+                "skip (тестовый режим) chat=%s — не в списке TEST_CHAT_IDS",
+                msg.chat_id,
+            )
+            return
+
+        # /start обнуляет чат: следующее сообщение пойдёт как первый контакт.
+        # Делаем ДО дедупа — иначе стёртый id сообщения останется в
+        # seen_messages и повторный /start молча ничего не сделает.
+        if self._is_reset_command(msg):
+            wiped = self.db.forget_chat(msg.chat_id)
+            logger.info(
+                "chat=%s /start — чат забыт: сообщений=%s, заявок=%s",
+                msg.chat_id,
+                wiped.get("messages", 0),
+                wiped.get("price_requests", 0) + wiped.get("document_requests", 0),
+            )
+
         if msg.message_id and self.db.seen_message(msg.message_id):
             return
         if msg.message_id:
@@ -254,6 +275,19 @@ class Orchestrator:
             if send.external_id:
                 self.db.mark_seen(send.external_id, msg.chat_id)
             self.db.touch_bot_message(msg.chat_id)
+
+    def _is_reset_command(self, msg: IncomingMessage) -> bool:
+        """Клиент нажал /start и мы в тестовом режиме.
+
+        Только тест: в бою человек, набравший /start, не должен терять
+        историю переписки — он этого не ожидает и не поймёт, почему бот
+        вдруг спрашивает то, что уже знал.
+        """
+        if msg.is_echo or not self.settings.test_mode:
+            return False
+        if not self.settings.test_reset_on_start:
+            return False
+        return (msg.text or "").strip().lower() in {"/start", "/старт", "/reset"}
 
     async def _on_staff_echo(self, msg: IncomingMessage) -> None:
         """Исходящее, отправленное не через наш API.

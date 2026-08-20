@@ -801,6 +801,96 @@ def test_dialog_hygiene() -> None:
     )
 
 
+async def test_chat_whitelist_and_reset(tmp: Path) -> None:
+    """Тестовый режим: только свои chat_id, /start обнуляет чат.
+
+    Канал уже отфильтрован, но на нём может оказаться и настоящий клиент —
+    отвечать ему во время тестов нельзя. И /start должен давать чистый лист,
+    иначе каждый прогон продолжает вчерашний разговор.
+    """
+    local = Settings(
+        wazzup_api_key="k", wazzup_send_enabled=False, test_mode=True,
+        test_channel_ids="ch-1", fresh_channel_ids="ch-1",
+        test_chat_ids="7936875555,1088968340",
+        poe_api_key="", max_enabled=False, vision_enabled=False,
+        backup_enabled=False, health_watch_enabled=False, fast_mode=True,
+    )
+    db = Database(tmp / "wl.db")
+    w = SilentWazzup(local, db)
+    orch = Orchestrator(local, db, w)
+    orch.baseline_ready = True
+
+    check("свой chat_id пропущен", w.chat_allowed("7936875555"))
+    check("второй свой тоже", w.chat_allowed("1088968340"))
+    check("чужой отсечён", not w.chat_allowed("79001234567"))
+
+    # Чужой не должен даже завестись в базе
+    for m in w.parse_webhook(
+        {"messages": [msg("o1", "text", text="привет", chatId="79001234567")]}
+    ):
+        await orch.ingest(m)
+    check("чужой чат в базу не попал", db.get_chat("79001234567") is None)
+    check("чужому ничего не отправили", w.sent == [])
+
+    # Свой — обрабатывается
+    for m in w.parse_webhook(
+        {"messages": [msg("m1", "text", text="нужна кухня", chatId="7936875555")]}
+    ):
+        await orch.ingest(m)
+    check("свой чат заведён", db.get_chat("7936875555") is not None)
+
+    # Накопим историю и заявку, потом /start должен всё стереть
+    db.add_message("7936875555", role="assistant", text="Здравствуйте!")
+    db.open_price_request(
+        request_id="r1", chat_id="7936875555", summary="кухня", ask="посчитать"
+    )
+    before = len(db.recent_messages("7936875555", 50))
+    check("история накопилась", before >= 2, f"сообщений={before}")
+
+    for m in w.parse_webhook(
+        {"messages": [msg("s1", "text", text="/start", chatId="7936875555")]}
+    ):
+        await orch.ingest(m)
+
+    # Старое стёрто, но сам /start остаётся первой репликой новой переписки:
+    # так бот увидит человека впервые и поздоровается, а не продолжит вчерашнее
+    left = db.recent_messages("7936875555", 50)
+    check(
+        "/start стёр прошлую переписку",
+        len(left) == 1 and left[0]["text"].strip() == "/start",
+        f"осталось {len(left)}: {[m['text'][:20] for m in left]}",
+    )
+    check("/start закрыл заявку", db.get_price_by_request_id("r1") is None)
+    check(
+        "после /start чат снова первый контакт",
+        (db.get_chat("7936875555") or {}).get("status") in (None, "new"),
+        str((db.get_chat("7936875555") or {}).get("status")),
+    )
+
+    # В бою /start ничего не стирает
+    prod = Settings(
+        wazzup_api_key="k", wazzup_send_enabled=False, test_mode=False,
+        poe_api_key="", max_enabled=False, vision_enabled=False,
+        backup_enabled=False, health_watch_enabled=False, fast_mode=True,
+    )
+    db2 = Database(tmp / "prod.db")
+    w2 = SilentWazzup(prod, db2)
+    orch2 = Orchestrator(prod, db2, w2)
+    orch2.baseline_ready = True
+    db2.upsert_chat("chat-1", status="new")
+    db2.add_message("chat-1", role="user", text="нужна кухня")
+    for m in w2.parse_webhook({"messages": [msg("s2", "text", text="/start")]}):
+        await orch2.ingest(m)
+    check(
+        "в бою /start историю НЕ трогает",
+        len(db2.recent_messages("chat-1", 50)) >= 1,
+        f"сообщений={len(db2.recent_messages('chat-1', 50))}",
+    )
+
+    await w.aclose()
+    await w2.aclose()
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -921,6 +1011,9 @@ def main() -> None:
 
         print("\n--- amoCRM baseline (заглушка) ---")
         asyncio.run(test_amocrm_baseline(tmp))
+
+        print("\n--- Тестовый режим: свои chat_id и сброс по /start ---")
+        asyncio.run(test_chat_whitelist_and_reset(tmp))
 
         print("\n--- Бот берёт только новых клиентов ---")
         asyncio.run(test_first_contact_policy(tmp))

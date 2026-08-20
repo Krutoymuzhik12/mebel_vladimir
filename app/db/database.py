@@ -721,3 +721,23 @@ class Database:
                 (chat_id,),
             ).fetchone()
         return row is not None
+
+    def forget_chat(self, chat_id: str) -> dict[str, int]:
+        """Стереть чат из базы целиком: статус, историю, дедуп, заявки.
+
+        Нужно для тестов: после /start бот должен увидеть человека впервые,
+        а не продолжать вчерашний разговор. Возвращает, сколько строк удалено
+        из каждой таблицы — чтобы в логе было видно, что реально стёрлось.
+        """
+        counts: dict[str, int] = {}
+        with self._conn() as conn:
+            for table in (
+                "messages",
+                "seen_messages",
+                "price_requests",
+                "document_requests",
+                "chats",
+            ):
+                cur = conn.execute(f"DELETE FROM {table} WHERE chat_id=?", (chat_id,))
+                counts[table] = cur.rowcount
+        return counts
