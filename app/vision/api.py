@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from collections import defaultdict
 from typing import Optional
 
@@ -12,14 +13,47 @@ from qdrant_client.models import FieldCondition, Filter, MatchAny
 
 from app.vision.config import (
     QDRANT_COLLECTION,
+    QDRANT_PATH,
     SIMILARITY_THRESHOLD,
     TOP_K,
     make_qdrant_client,
 )
 from app.vision.embedder import embed
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Vasha Mebel Vision Search")
-qc = make_qdrant_client()
+
+# Хранилище открываем при старте приложения, а не при импорте модуля.
+# Qdrant в локальном режиме пускает к папке ровно один процесс, и раньше
+# конфликт блокировки убивал процесс прямо на импорте — uvicorn не успевал
+# даже подняться, а в логе был голый traceback вместо внятной причины.
+_qc = None
+
+
+def qdrant():
+    """Клиент Qdrant. Открывается лениво и переживает временную занятость."""
+    global _qc
+    if _qc is None:
+        _qc = make_qdrant_client()
+    return _qc
+
+
+@app.on_event("startup")
+def _open_storage() -> None:
+    try:
+        qdrant()
+        logger.info("Qdrant открыт: %s", QDRANT_COLLECTION)
+    except RuntimeError as exc:
+        # Понятное сообщение вместо трейсбека: почти всегда это оставшийся
+        # процесс vision, который ещё держит папку индекса.
+        logger.error(
+            "Не открыть хранилище Qdrant: %s. Обычно это другой экземпляр "
+            "vision — проверьте: fuser -v %s/.lock",
+            exc,
+            QDRANT_PATH,
+        )
+        raise
 
 
 def _parse_colors(raw: Optional[str]) -> list[str]:
@@ -58,7 +92,7 @@ async def search(
     query_filter = Filter(must=conditions) if conditions else None
 
     try:
-        hits = qc.query_points(
+        hits = qdrant().query_points(
             collection_name=QDRANT_COLLECTION,
             query=vec.tolist(),
             query_filter=query_filter,
@@ -101,7 +135,7 @@ async def search(
 @app.get("/health")
 async def health():
     try:
-        info = qc.get_collection(QDRANT_COLLECTION)
+        info = qdrant().get_collection(QDRANT_COLLECTION)
         points = info.points_count
         qdrant_ok = True
     except Exception:

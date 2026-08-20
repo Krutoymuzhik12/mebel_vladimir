@@ -2,6 +2,12 @@
 Description=Vladimir mebel vision (подбор по фото, DINOv2 + Qdrant)
 After=network-online.target
 Wants=network-online.target
+# Qdrant в локальном режиме пускает к папке индекса ровно один процесс.
+# Если экземпляр не смог её открыть, бесконечные перезапуски не помогут —
+# они только мешают предыдущему освободить блокировку. Три попытки за две
+# минуты, дальше служба честно останавливается с ошибкой в логе.
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -16,6 +22,17 @@ Environment=MKL_NUM_THREADS=2
 ExecStart=/var/opt/vladimir/.venv-vision/bin/python -m uvicorn app.vision.api:app --host 127.0.0.1 --port 8090
 # Модель грузится в память при первом запросе, старт не мгновенный
 TimeoutStartSec=300
+
+# uvicorn по SIGINT завершается сразу, по SIGTERM ждёт закрытия соединений и
+# может держать блокировку Qdrant дольше, чем systemd поднимет следующий
+# экземпляр. Тогда новый разбивается о старый, и так по кругу.
+KillSignal=SIGINT
+# Добиваем всё дерево процессов: иначе экземпляр переживает stop, остаётся
+# без присмотра systemd и держит папку индекса — ровно это и случилось.
+KillMode=control-group
+SendSIGKILL=yes
+TimeoutStopSec=20
+
 # Потолок памяти: при утечке или всплеске ядро прибьёт именно vision, а не
 # основной сервис. Подбор по фото — не критичная функция, бот переживёт его
 # падение и честно скажет клиенту, что подбор недоступен.
@@ -23,8 +40,11 @@ TimeoutStartSec=300
 MemoryHigh=1G
 MemoryMax=1500M
 OOMPolicy=continue
-Restart=always
-RestartSec=10
+
+Restart=on-failure
+# Дольше, чем uvicorn закрывается: иначе следующий экземпляр стартует раньше,
+# чем предыдущий отпустил блокировку.
+RestartSec=25
 StandardOutput=journal
 StandardError=journal
 
