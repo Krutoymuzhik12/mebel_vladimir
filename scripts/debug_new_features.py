@@ -891,6 +891,77 @@ async def test_chat_whitelist_and_reset(tmp: Path) -> None:
     await w2.aclose()
 
 
+async def test_no_double_greeting(tmp: Path) -> None:
+    """Два батча из одного чата не должны здороваться оба.
+
+    Живой случай: /start и «здравствуйте» пришли с разницей в 7 секунд, окно
+    склейки 6 — получились два батча. Обрабатывались параллельно, и второй
+    прочитал историю раньше, чем первый успел записать свой ответ (тот
+    сохраняется только после отправки, а перед ней пауза 5-8 секунд). Второй
+    решил, что он первый контакт, и клиент получил два приветствия подряд.
+    """
+    local = Settings(
+        wazzup_api_key="k", wazzup_send_enabled=False, test_mode=False,
+        poe_api_key="", max_enabled=False, vision_enabled=False,
+        backup_enabled=False, health_watch_enabled=False, fast_mode=True,
+    )
+    db = Database(tmp / "race.db")
+    w = SilentWazzup(local, db)
+    orch = Orchestrator(local, db, w)
+    orch.baseline_ready = True
+    db.upsert_chat("chat-1", status="new")
+
+    order: list[str] = []
+
+    async def slow_handle(chat_id, messages):
+        """Медленный обработчик: держит чат дольше, чем приходит второй батч."""
+        order.append(f"start:{messages[0].text}")
+        await asyncio.sleep(0.05)
+        # Ответ бота попадает в историю только здесь — как в бою, после отправки
+        db.add_message(chat_id, role="assistant", text="Здравствуйте! Владимир.")
+        order.append(f"end:{messages[0].text}")
+
+    orch._handle_batch = slow_handle  # noqa: SLF001
+
+    m1 = w.parse_webhook({"messages": [msg("b1", "text", text="/start")]})[0]
+    m2 = w.parse_webhook({"messages": [msg("b2", "text", text="здравствуйте")]})[0]
+
+    # Оба батча стартуют одновременно — ровно как в проде
+    await asyncio.gather(
+        orch._on_batch("chat-1", [m1]),  # noqa: SLF001
+        orch._on_batch("chat-1", [m2]),  # noqa: SLF001
+    )
+
+    check(
+        "батчи одного чата не перекрываются",
+        order in (
+            ["start:/start", "end:/start", "start:здравствуйте", "end:здравствуйте"],
+            ["start:здравствуйте", "end:здравствуйте", "start:/start", "end:/start"],
+        ),
+        " → ".join(order),
+    )
+    check(
+        "блокировки не копятся после обработки",
+        orch._chat_locks == {},  # noqa: SLF001
+        f"{list(orch._chat_locks)}",  # noqa: SLF001
+    )
+
+    # Разные чаты друг друга не ждут — иначе один медленный клиент
+    # затормозил бы всю очередь
+    db.upsert_chat("chat-2", status="new")
+    order.clear()
+    await asyncio.gather(
+        orch._on_batch("chat-1", [m1]),  # noqa: SLF001
+        orch._on_batch("chat-2", [m2]),  # noqa: SLF001
+    )
+    check(
+        "разные чаты обрабатываются параллельно",
+        order[0].startswith("start:") and order[1].startswith("start:"),
+        " → ".join(order),
+    )
+    await w.aclose()
+
+
 def test_gatekeeper_baseline(db_path: Path) -> None:
     db = Database(db_path)
     gate = Gatekeeper(db)
@@ -1011,6 +1082,9 @@ def main() -> None:
 
         print("\n--- amoCRM baseline (заглушка) ---")
         asyncio.run(test_amocrm_baseline(tmp))
+
+        print("\n--- Один чат обрабатывается по очереди ---")
+        asyncio.run(test_no_double_greeting(tmp))
 
         print("\n--- Тестовый режим: свои chat_id и сброс по /start ---")
         asyncio.run(test_chat_whitelist_and_reset(tmp))

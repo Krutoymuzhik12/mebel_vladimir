@@ -52,6 +52,8 @@ class Orchestrator:
         self.health = HealthWatch(settings, self.max_notifier)
         self.batcher = MessageBatcher(settings, self._on_batch)
         self._bg_tasks: list[asyncio.Task] = []
+        # Один чат — одна очередь обработки, см. _on_batch
+        self._chat_locks: dict[str, asyncio.Lock] = {}
         # Загружен ли список старых чатов. Пока нет — незнакомым не пишем.
         self.baseline_ready = False
 
@@ -345,6 +347,29 @@ class Orchestrator:
         )
 
     async def _on_batch(self, chat_id: str, messages: list[IncomingMessage]) -> None:
+        """Один чат обрабатываем строго по очереди.
+
+        Без этого два батча из одного чата считаются параллельно, и второй
+        читает историю до того, как первый успел записать свой ответ: тот
+        сохраняется только после отправки, а перед ней есть пауза в 5-8
+        секунд. Второй видит чат без единой реплики бота, считает себя
+        первым контактом и здоровается ещё раз. Клиент получает два
+        «Здравствуйте, меня зовут Владимир» подряд.
+
+        Заодно это чинит гонки за факты о клиенте и за открытие заявки:
+        раньше два батча могли завести две карточки расчёта на один чат.
+        """
+        lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            await self._handle_batch(chat_id, messages)
+
+        # Если после выхода лок свободен — на него никто не претендует, и
+        # держать его в словаре незачем: иначе за годы работы там осядет
+        # запись на каждый чат, который когда-либо писал.
+        if not lock.locked() and self._chat_locks.get(chat_id) is lock:
+            self._chat_locks.pop(chat_id, None)
+
+    async def _handle_batch(self, chat_id: str, messages: list[IncomingMessage]) -> None:
         if not self.gate.bot_may_reply(chat_id):
             return
         result = await self.dialog.handle(chat_id, messages)
